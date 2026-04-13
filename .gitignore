@@ -1,0 +1,31 @@
+# .gitignore para MusicGrabber
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Proyecto Music Grabber (Específicos)
+.bin/
+*.json
+!example_config.json
+.queue.json
+.queue.json.tmp
+Library_Ledger.log
+.historial_descargas.txt
+
+# Empaquetado y Build
+build/
+dist/
+*.spec
+
+# VS Code
+.vscode/
+.history/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
