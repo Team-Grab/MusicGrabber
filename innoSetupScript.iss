@@ -13,7 +13,7 @@ OutputBaseFilename=MusicGrabber_Setup_v1.0.0
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "D:\Development\Music Grabber\dist\MusicGrabber.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\MusicGrabber.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Music Grabber"; Filename: "{app}\MusicGrabber.exe"

@@ -29,3 +29,10 @@ dist/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Ejecutables y binarios en la raíz
+*.exe
+
+# Notas personales
+cosas.txt
+*.txt
