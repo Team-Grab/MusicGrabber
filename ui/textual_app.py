@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import string
@@ -21,14 +22,29 @@ def _get_clipboard() -> str:
     """Devuelve el contenido del portapapeles. Cadena vacía si falla."""
     try:
         if sys.platform.startswith("win"):
-            result = subprocess.run(
-                ["powershell", "-Command", "Get-Clipboard"],
-                capture_output=True, text=True, timeout=2,
-            )
-            return result.stdout.strip()
+            # ctypes: acceso directo al clipboard de Windows sin subproceso.
+            # Evita lanzar PowerShell cada 2 segundos (300-800ms de overhead).
+            import ctypes
+            CF_UNICODETEXT = 13
+            if not ctypes.windll.user32.OpenClipboard(0):
+                return ""
+            try:
+                handle = ctypes.windll.user32.GetClipboardData(CF_UNICODETEXT)
+                if not handle:
+                    return ""
+                p = ctypes.windll.kernel32.GlobalLock(handle)
+                if not p:
+                    return ""
+                try:
+                    return ctypes.wstring_at(p).strip()
+                finally:
+                    ctypes.windll.kernel32.GlobalUnlock(handle)
+            finally:
+                ctypes.windll.user32.CloseClipboard()
         else:
-            # Wayland primero, luego X11
-            for cmd in [["wl-paste", "--no-newline"], ["xclip", "-o", "-selection", "clipboard"], ["xdotool", "getactivewindow"]]:
+            # Wayland primero, luego X11.
+            # xdotool getactivewindow NO lee el clipboard — eliminado.
+            for cmd in [["wl-paste", "--no-newline"], ["xclip", "-o", "-selection", "clipboard"]]:
                 try:
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
                     if result.returncode == 0:
@@ -66,7 +82,6 @@ def get_drives():
             if os.path.exists(drive):
                 drives.append((f"💿 Disco {letter}:", drive))
     else:
-        # Fallback seguro para el nombre de usuario (os.getlogin() falla en algunos entornos)
         username = os.environ.get("USER") or os.environ.get("LOGNAME") or Path.home().name
         for mount_base in (f"/run/media/{username}", f"/media/{username}", "/mnt"):
             if os.path.isdir(mount_base):
@@ -164,15 +179,15 @@ class SetupScreen(ModalScreen):
 class BootScreen(ModalScreen):
     CSS = """
     BootScreen { align: center middle; background: #0a0a0a; }
-    #boot_container { width: 75%; height: 65%; border: double #00ffcc; background: #111; padding: 1; }
+    #boot_container { width: 75%; height: 65%; min-height: 22; border: double #00ffcc; background: #111; padding: 1; }
     .ascii_logo { text-align: left; margin-bottom: 1; padding-left: 2; }
-    #boot_log { height: 1fr; border: solid #333; background: #000; }
+    #boot_log { height: 1fr; min-height: 6; border: solid #333; background: #000; }
     """
 
     def compose(self) -> ComposeResult:
         with Container(id="boot_container"):
             ascii_logo = """
-[bold cyan]   ███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ [/bold cyan]  [bold magenta]MUSIC GRABBER v1.0.0[/bold magenta]
+[bold cyan]   ███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ [/bold cyan]  [bold magenta]MUSIC GRABBER v1.1.1[/bold magenta]
 [bold cyan]   ████╗ ████║██║   ██║██╔════╝██║██╔════╝ [/bold cyan]
 [bold cyan]   ██╔████╔██║██║   ██║███████╗██║██║      [/bold cyan]
 [bold cyan]   ██║╚██╔╝██║██║   ██║╚════██║██║██║      [/bold cyan]
@@ -237,7 +252,7 @@ class HelpScreen(ModalScreen):
             with VerticalScroll(id="help_scroll"):
                 mini_logo = """
 [bold cyan]  __  __  ____  [/bold cyan]
-[bold cyan] |  \\/  |/ ___| [/bold cyan]  [bold magenta]MUSIC GRABBER v1.0.0[/bold magenta]
+[bold cyan] |  \\/  |/ ___| [/bold cyan]  [bold magenta]MUSIC GRABBER v1.1.1[/bold magenta]
 [bold cyan] | |\\/| | |  _  [/bold cyan]  [dim]Orquestador de Preservación Digital[/dim]
 [bold cyan] | |  | | |_| | [/bold cyan]  [dim]Resiliencia & Metadatos Pro[/dim]
 [bold cyan] |_|  |_|\\____| [/bold cyan]
@@ -428,10 +443,8 @@ class HistoryScreen(ModalScreen):
 
         try:
             lines = ledger_path.read_text(encoding="utf-8").splitlines()
-            entries = lines[-200:]  # últimas 200 entradas
+            entries = lines[-200:]
             for i, line in enumerate(reversed(entries), 1):
-                # Formato: youtube <vid> "<ruta>"
-                import re
                 m = re.match(r'^youtube ([a-zA-Z0-9_-]{11}) "(.*)"$', line.strip())
                 if m:
                     vid      = m.group(1)
@@ -488,7 +501,7 @@ class ResumeScreen(ModalScreen):
 # ---------------------------------------------------------------------------
 
 class MusicGrabberTUI(App):
-    TITLE = "MUSIC GRABBER v1.0.0"
+    TITLE = "MUSIC GRABBER v1.1.1"
     _last_capture_text: str = ""
     _last_clipboard: str = ""
 
@@ -545,18 +558,15 @@ class MusicGrabberTUI(App):
     def action_history(self): self.push_screen(HistoryScreen())
 
     def action_maximize(self) -> None:
-        """F11 — alterna cabecera y pie para ganar espacio vertical."""
         header  = self.query_one(Header)
         footer  = self.query_one(Footer)
         header.visible = not header.visible
         footer.visible = not footer.visible
 
     def action_quit_app(self) -> None:
-        """ESC — sale de la app limpiamente."""
         self.exit()
 
     def action_cancelar(self) -> None:
-        """Ctrl+C — cancela si hay descarga activa; sale si está idle."""
         with state.lock:
             is_active = "SCANNING" in state.session_status or "LINKED" in state.session_status
         if is_active:
@@ -648,11 +658,11 @@ class MusicGrabberTUI(App):
                     yield Select(
                         [("1-Álbum", "1"), ("2-Recop", "2"), ("3-Playlist", "3"),
                          ("4-Mix", "4"), ("5-Disco", "5"), ("6-Huérfano", "6")],
-                        prompt="MODO", id="select_mode",
+                        prompt="MODO", id="select_mode", value="3",
                     )
                     yield Select(
                         [("1-Rápido", "1"), ("2-Seguro", "2"), ("3-Nocturno", "3")],
-                        prompt="SPEED", id="select_speed",
+                        prompt="SPEED", id="select_speed", value="2",
                     )
 
                 yield Button("INICIAR PROTOCOLO", id="btn_download")
@@ -699,6 +709,12 @@ class MusicGrabberTUI(App):
         if not url:
             return
 
+        # Validación básica: debe ser una URL de YouTube reconocible
+        is_youtube = "youtube.com" in url or "youtu.be" in url or "music.youtube.com" in url
+        if not url.startswith("http") or not is_youtube:
+            self.notify("⚠️ URL no reconocida. Debe ser un enlace de YouTube o YouTube Music.", severity="error")
+            return
+
         select_mode  = self.query_one("#select_mode",  Select)
         select_speed = self.query_one("#select_speed", Select)
 
@@ -718,7 +734,6 @@ class MusicGrabberTUI(App):
         with state.lock:
             is_active = "SCANNING" in state.session_status or "LINKED" in state.session_status
 
-            # Botón dinámico
             if is_active:
                 btn_action.label = "🛑 DETENER PROTOCOLO"
                 btn_action.styles.background = "#ff0033"
@@ -728,7 +743,6 @@ class MusicGrabberTUI(App):
                 btn_action.styles.background = "#00ffcc"
                 btn_action.styles.color = "black"
 
-            # Status
             status_msg = self.query_one("#session_msg", Static)
             status_msg.update(state.session_status)
             if   "SCANNING"   in state.session_status: status_msg.styles.color = "#ffff00"
@@ -737,7 +751,6 @@ class MusicGrabberTUI(App):
             elif "ERROR"      in state.session_status: status_msg.styles.color = "#ff0000"
             else:                                       status_msg.styles.color = "#ff00ff"
 
-            # Panel izquierdo: pistas terminadas
             while state.recent_finishes:
                 ticket = state.recent_finishes.pop(0)
                 log = self.query_one("#log_descargas", RichLog)
@@ -760,7 +773,6 @@ class MusicGrabberTUI(App):
                     else:
                         log.write(f" • [bold green]OK:[/bold green] {title[:40]}")
 
-            # Estadísticas con timer acumulado y cola pendiente
             s = state.global_stats
             if is_active and s.get("start_time", 0.0) > 0:
                 elapsed  = time.time() - s["start_time"]
@@ -786,7 +798,6 @@ class MusicGrabberTUI(App):
                 f"{queue_str}"
             )
 
-            # Panel derecho: progreso activo
             if not state.active_downloads and not state.session_errors:
                 if self._last_capture_text:
                     capture_panel.update(self._last_capture_text)
@@ -803,7 +814,7 @@ class MusicGrabberTUI(App):
                     bar      = "▓" * filled + "░" * (bar_len - filled)
                     stuck    = ""
                     last_t   = data.get("last_progress", now)
-                    if now - last_t > 300 and prog < 100:   # 5 min sin avance
+                    if now - last_t > 300 and prog < 100:
                         stuck = " [bold yellow]⚠ posiblemente colgado[/bold yellow]"
                     display_text += f"│ {title:<38} │ {prog:>4.1f}% \\[{bar}]{stuck}\n"
 

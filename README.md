@@ -2,7 +2,7 @@
   <img src="assets/logo.png" width="400" alt="Music Grabber Logo">
 </p>
 
-# ◢◤ Music Grabber v1.1.0
+# ◢◤ Music Grabber v1.1.1
 
 **Music Grabber** es un orquestador de preservación digital diseñado para gestionar descargas de música con una arquitectura técnica resiliente y una interfaz TUI (Terminal User Interface) de estética cyberpunk.
 

@@ -107,6 +107,7 @@ if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete \
         --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
         --exclude='venv' --exclude='.venv' \
+        --exclude='notas.txt' \
         "$SCRIPT_DIR/" "$APP_DIR/"
 else
     cp -r "$SCRIPT_DIR"/. "$APP_DIR/"

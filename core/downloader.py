@@ -136,6 +136,9 @@ def _rollback_last_download() -> None:
                     hist_lines = f.readlines()
                 with open(history_path, "w", encoding="utf-8") as f:
                     f.writelines([l for l in hist_lines if vid not in l])
+            # Sincronizar también la caché en memoria
+            with state.lock:
+                state.history_cache.discard(vid)
 
             logger.info("Rollback preventivo completado.")
     except Exception as e:
@@ -155,10 +158,11 @@ def has_pending_session() -> bool:
 
 
 def load_queue_from_disk(resume_requested: bool = True) -> None:
+    # Limpieza de archivos parciales de yt-dlp al arrancar (solo extensiones inequívocamente temporales)
     if state.library_path:
         base_lib = Path(state.library_path)
         if base_lib.exists():
-            for ext in ["*.part", "*.ytdl", "*.webm", "*.m4a"]:
+            for ext in ["*.part", "*.ytdl"]:
                 for temp_file in base_lib.rglob(ext):
                     try:
                         temp_file.unlink()
@@ -235,7 +239,6 @@ class DaemonLogger:
 
 
 def _clean_metadata(info, *args, **kwargs):
-    # Comprobación correcta: state.cancel_requested, no APP_DATA_DIR
     if state.cancel_requested:
         return "Protocolo Abortado por el Usuario"
 
@@ -262,27 +265,20 @@ def _clean_metadata(info, *args, **kwargs):
         already_in_cache = any(e.get("id") == video_id for e in state.current_playlist_cache)
         if not already_in_cache:
             state.current_playlist_cache.append(info.copy())
+        # Comprobar historial desde la caché en memoria (sin leer archivo)
+        in_history = video_id in state.history_cache
 
-    if video_id:
-        base_lib     = Path(state.library_path)
-        history_path = base_lib / ".historial_descargas.txt"
-        if history_path.exists():
-            try:
-                content = history_path.read_text(encoding="utf-8")
-                if f"youtube {video_id}" in content:
-                    with state.lock:
-                        if not already_in_cache:
-                            state.global_stats["skipped"] += 1
-                            state.recent_finishes.append(("SKIPPED", title))
-                    return "El archivo ya está en el historial"
-            except Exception:
-                pass
+    if in_history:
+        with state.lock:
+            if not already_in_cache:
+                state.global_stats["skipped"] += 1
+                state.recent_finishes.append(("SKIPPED", title))
+        return "El archivo ya está en el historial"
 
     return None
 
 
 def _progress_hook(d):
-    # Comprobación correcta: state.cancel_requested, no APP_DATA_DIR
     if state.cancel_requested:
         raise Exception("Protocolo Abortado por el Usuario")
 
@@ -311,30 +307,15 @@ def _progress_hook(d):
             state.active_downloads[video_id]["last_progress"] = time.time()
 
     elif d["status"] == "finished":
+        # Guardar ruta esperada para cuando el postprocesado confirme éxito.
+        # El ledger y el historial se escriben en _postprocessor_hook, no aquí,
+        # para evitar registrar archivos cuyo postprocesado (ffmpeg) aún no ha terminado.
         filepath = d.get("filename")
-        base_lib = Path(state.library_path)
-
-        if filepath:
-            final_mp3   = Path(filepath).with_suffix(f".{state.audio_format}")
-            ledger_path = base_lib / "Library_Ledger.log"
-            line = f"youtube {video_id} \"{final_mp3}\"\n"
-            try:
-                content = ledger_path.read_text(encoding="utf-8") if ledger_path.exists() else ""
-                if video_id not in content:
-                    with open(ledger_path, "a", encoding="utf-8") as f:
-                        f.write(line)
-            except Exception:
-                pass
-
-            history_path = base_lib / ".historial_descargas.txt"
-            try:
-                with open(history_path, "a", encoding="utf-8") as f:
-                    f.write(f"youtube {video_id}\n")
-            except Exception:
-                pass
-
         with state.lock:
             if video_id in state.active_downloads:
+                if filepath:
+                    final_path = str(Path(filepath).with_suffix(f".{state.audio_format}"))
+                    state.active_downloads[video_id]["pending_filepath"] = final_path
                 state.active_downloads[video_id]["progress"] = 95.0
                 state.active_downloads[video_id]["status"]   = "Extrayendo Audio..."
 
@@ -362,6 +343,30 @@ def _postprocessor_hook(d: dict) -> None:
                         state.active_downloads[video_id]["notified"] = True
                         track_title  = state.active_downloads[video_id].get("title", "Track desconocido")
                         original_url = info.get("webpage_url", "")
+                        pending_path = state.active_downloads[video_id].get("pending_filepath")
+
+                        # Registrar en ledger e historial solo cuando el postprocesado está confirmado.
+                        # Así evitamos entradas huérfanas si ffmpeg falla a mitad.
+                        if pending_path and state.library_path:
+                            base_lib    = Path(state.library_path)
+                            ledger_path = base_lib / "Library_Ledger.log"
+                            line        = f'youtube {video_id} "{pending_path}"\n'
+                            try:
+                                content = ledger_path.read_text(encoding="utf-8") if ledger_path.exists() else ""
+                                if video_id not in content:
+                                    with open(ledger_path, "a", encoding="utf-8") as f:
+                                        f.write(line)
+                            except Exception:
+                                pass
+                            try:
+                                history_path = base_lib / ".historial_descargas.txt"
+                                with open(history_path, "a", encoding="utf-8") as f:
+                                    f.write(f"youtube {video_id}\n")
+                            except Exception:
+                                pass
+                            # Actualizar caché en memoria para el resto de la sesión
+                            state.history_cache.add(video_id)
+
                         state.recent_finishes.append((track_title, original_url))
                         state.global_stats["success"] += 1
 
@@ -462,7 +467,7 @@ def _get_ydl_opts(mode: str, speed: str) -> dict:
         "logger":              DaemonLogger(),
         "progress_hooks":      [_progress_hook],
         "postprocessor_hooks": [_postprocessor_hook],
-        "socket_timeout":      30,   # evita cuelgues de red indefinidos
+        "socket_timeout":      30,
     }
 
     if speed == "2":
@@ -511,12 +516,32 @@ def _worker_loop():
         url, mode, speed = task.get("url"), task.get("mode"), task.get("speed")
 
         try:
+            # Cargar historial en caché de memoria para esta tarea.
+            # Evita leer el archivo una vez por pista en playlists grandes.
+            if state.library_path:
+                _hist_path = Path(state.library_path) / ".historial_descargas.txt"
+                try:
+                    if _hist_path.exists():
+                        content = _hist_path.read_text(encoding="utf-8")
+                        loaded = {
+                            parts[1]
+                            for line in content.splitlines()
+                            if line.startswith("youtube ")
+                            for parts in [line.split()]
+                            if len(parts) >= 2
+                        }
+                    else:
+                        loaded = set()
+                except Exception:
+                    loaded = set()
+                with state.lock:
+                    state.history_cache = loaded
+
             with state.lock:
                 state.cancel_requested = False
                 state.session_status   = "SCANNING // ANALIZANDO ENLACE..."
                 state.current_playlist_cache.clear()
 
-                # Acumula el timer de sesión (solo se fija en la primera tarea)
                 if state.session_start_time == 0.0:
                     state.session_start_time = time.time()
                 state.global_stats["start_time"] = time.time()
@@ -537,7 +562,6 @@ def _worker_loop():
                 if not state.cancel_requested:
                     generate_m3u8(parent_title, mode, state.library_path)
 
-            # Fin exitoso
             with state.lock:
                 elapsed = time.time() - state.global_stats["start_time"]
                 state.session_status                 = "ABORTED // DETENIDO" if state.cancel_requested else "COMPLETED // FINALIZADO"
@@ -546,7 +570,6 @@ def _worker_loop():
                 state.pending_queue_count            = download_queue.qsize()
                 state.current_task                   = None
 
-            # Notificación de escritorio si no fue cancelado
             if not state.cancel_requested:
                 s = state.global_stats
                 _send_notification(
@@ -577,9 +600,11 @@ def _worker_loop():
                         except Exception:
                             break
 
+                # Limpiar solo archivos inequívocamente temporales de yt-dlp.
+                # NO incluir .webp, .vtt, .srt ni otros que puedan ser archivos legítimos del usuario.
                 try:
                     base_lib = Path(state.library_path)
-                    for ext in ["*.part", "*.ytdl", "*.webp", "*.vtt", "*.srt"]:
+                    for ext in ["*.part", "*.ytdl"]:
                         for temp_file in base_lib.rglob(ext):
                             try:
                                 temp_file.unlink()

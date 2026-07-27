@@ -1,5 +1,27 @@
 # Changelog — Music Grabber
 
+## v1.1.1 (2026-05-14)
+
+### Bugs corregidos
+- **Clipboard Windows**: reemplazado subprocess PowerShell por `ctypes` — elimina el lag de 300-800ms que se acumulaba cada 2 segundos.
+- **Clipboard Linux**: eliminado fallback `xdotool getactivewindow` que devolvía el ID de la ventana activa en lugar del contenido del portapapeles.
+- **Ledger e historial escritos antes de que ffmpeg terminase**: movida la escritura de `Library_Ledger.log` y `.historial_descargas.txt` a `_postprocessor_hook` — ahora solo se registra cuando el postprocesado está confirmado. Evita entradas huérfanas que bloqueaban la re-descarga si ffmpeg fallaba a mitad.
+- **Cleanup agresivo en biblioteca**: el `rglob` del finally de `_worker_loop` borraba `.webp`, `.vtt` y `.srt` en toda la biblioteca del usuario. Ahora solo borra `.part` y `.ytdl` (inequívocamente temporales). Mismo fix en `load_queue_from_disk` (antes borraba también `.webm` y `.m4a`).
+- **BootScreen invisible en ventana pequeña**: añadido `min-height: 6` al `#boot_log` y `min-height: 22` al contenedor para garantizar que el log de bootstrap siempre sea visible.
+- **Versión desincronizada**: `TITLE`, BootScreen y HelpScreen mostraban `v1.0.0`. Corregido a `v1.1.0` en los tres lugares.
+- **`import re` dentro de método**: movido al top del módulo en `textual_app.py`.
+- **robocopy en `install.ps1`**: añadida verificación de `$LASTEXITCODE >= 8` (códigos 0-7 son éxito parcial en robocopy, no errores).
+- **Icono del acceso directo en `install.ps1`**: buscaba `assets\logo.ico` pero el archivo es `assets\app.ico`.
+
+### Mejoras
+- **Caché de historial en memoria**: `_clean_metadata` ya no lee `.historial_descargas.txt` una vez por pista. El historial se carga en memoria al inicio de cada tarea (`state.history_cache`) y se actualiza en tiempo real. Mejora notable en playlists grandes.
+- **Selects con valor por defecto**: Modo 3 (Playlist) y Speed 2 (Seguro) preseleccionados al arrancar.
+- **Validación de URL**: `procesar_input` ahora rechaza entradas que no sean URLs de YouTube antes de encolarlas.
+- **Acceso directo Windows usa Windows Terminal** si está disponible (`wt.exe`), con fallback a `cmd.exe`. Mejor renderizado de la TUI.
+- **`install.sh`**: rsync excluye `notas.txt` para no copiar archivos de trabajo al directorio de instalación.
+
+---
+
 ## v1.1.0 (2026-05-14)
 
 ### Nuevas features

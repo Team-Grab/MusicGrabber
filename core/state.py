@@ -4,7 +4,7 @@ import threading
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Set, Tuple, Optional
+from typing import Dict, Any, List, Set, Tuple, Optional, FrozenSet
 from pathlib import Path
 
 # Setup de Logging
@@ -44,6 +44,7 @@ class AppState:
     cancel_requested: bool = False
     pending_queue_count: int = 0       # tareas en cola pendientes de empezar
     session_start_time: float = 0.0    # marca de inicio de la primera tarea (no se resetea)
+    history_cache: Set[str] = field(default_factory=set)  # IDs ya descargados (cargados en memoria al inicio de cada tarea)
     global_stats: Dict[str, Any] = field(default_factory=lambda: {
         "success": 0, "skipped": 0, "failed": 0, "start_time": 0.0, "total_time": "0s"
     })

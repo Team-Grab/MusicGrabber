@@ -92,6 +92,9 @@ if ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "main.py"))) {
     # Modo local: ejecutado desde un clon.
     Info "Copiando desde $ScriptDir..."
     robocopy $ScriptDir $AppDir /E /NFL /NDL /NJH /NJS /NP /XD .git venv .venv __pycache__ /XF "*.pyc" | Out-Null
+    # robocopy usa códigos 0-7 para éxito parcial; solo >=8 indica error real.
+    if ($LASTEXITCODE -ge 8) { Fail "Error al copiar archivos (robocopy exit $LASTEXITCODE)" }
+    $LASTEXITCODE = 0
 } else {
     # Modo remoto (irm | iex): clonar.
     Info "Clonando $RepoUrl..."
@@ -140,10 +143,18 @@ Ok "Comando 'musicgrabber' disponible."
 Info "Creando acceso directo en Menu Inicio..."
 $wsh = New-Object -ComObject WScript.Shell
 $sc  = $wsh.CreateShortcut($Shortcut)
-$sc.TargetPath       = "$env:WINDIR\System32\cmd.exe"
-$sc.Arguments        = "/k `"$Launcher`""
+# Preferir Windows Terminal (mejor soporte ANSI/Unicode para la TUI).
+# Fallback a cmd.exe si wt.exe no está disponible.
+$wtExe = (Get-Command wt.exe -ErrorAction SilentlyContinue)
+if ($wtExe) {
+    $sc.TargetPath = $wtExe.Source
+    $sc.Arguments  = "-- `"$Launcher`""
+} else {
+    $sc.TargetPath = "$env:WINDIR\System32\cmd.exe"
+    $sc.Arguments  = "/k `"$Launcher`""
+}
 $sc.WorkingDirectory = $AppDir
-$iconPath = Join-Path $AppDir "assets\logo.ico"
+$iconPath = Join-Path $AppDir "assets\app.ico"
 if (Test-Path $iconPath) { $sc.IconLocation = $iconPath }
 $sc.Description = "Music Grabber - Orquestador de preservacion digital"
 $sc.Save()
