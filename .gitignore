@@ -9,12 +9,13 @@ venv/
 
 # Proyecto Music Grabber (Específicos)
 .bin/
+_inbox/
+library.db
+library.db-journal
 *.json
 !example_config.json
 .queue.json
 .queue.json.tmp
-Library_Ledger.log
-.historial_descargas.txt
 
 # Empaquetado y Build
 build/

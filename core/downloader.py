@@ -1,25 +1,58 @@
-import re
+"""
+Motor de descargas v2.0.
+
+Cada URL pasa por:
+  1. yt-dlp descarga el audio a APP_DATA_DIR/_inbox/.
+  2. ffmpeg extrae al formato configurado (mp3 / flac / ogg).
+  3. pipeline.process_new_download() aplica tags, consulta MusicBrainz y
+     mueve el archivo al árbol canónico de la biblioteca.
+
+Los 6 modos de orquestación del v1.x (Álbum, Recopilatorio, Playlist, Mix,
+Discografía, Huérfano) desaparecen. MusicBrainz es ahora el único organizador.
+
+API pública:
+  start_download_worker()
+  add_download(url, speed, mode=None)
+  load_queue_from_disk(resume_requested=True)
+  has_pending_session() -> bool
+"""
+
 import os
+import re
 import sys
 import threading
 import queue
 import time
 import json
+import tempfile
 import datetime
 import subprocess
-import yt_dlp
 import logging
 from pathlib import Path
-from core.state import state, APP_DATA_DIR, save_config
+from typing import Optional
+
+import yt_dlp
+
+from core.state import state, APP_DATA_DIR, log_event
 from core.bootstrap import get_ffmpeg_path
-from yt_dlp.utils import sanitize_filename
+from core import pipeline, library
 
-# Rutas de archivos
-BIN_DIR   = APP_DATA_DIR / ".bin"
-QUEUE_FILE = APP_DATA_DIR / ".queue.json"
-
-download_queue = queue.Queue()
 logger = logging.getLogger("Downloader")
+
+QUEUE_FILE = APP_DATA_DIR / ".queue.json"
+INBOX_DIR  = APP_DATA_DIR / "_inbox"
+
+download_queue: queue.Queue = queue.Queue()
+
+# Lock para escrituras atómicas de la cola persistente.
+# Sin esto, el thread principal (add_download) y el worker pueden
+# pisarse mutuamente al escribir el .tmp y hacer replace.
+_queue_io_lock = threading.Lock()
+
+# Contador de intentos por sesión, para detectar fallos silenciosos de yt-dlp
+# (vídeos que no llegan al postprocessor y no pasan por DaemonLogger.error).
+_attempted_in_batch: set[str] = set()
+_processed_in_batch: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -27,16 +60,13 @@ logger = logging.getLogger("Downloader")
 # ---------------------------------------------------------------------------
 
 def _send_notification(title: str, message: str) -> None:
-    """Notificación de escritorio. Falla en silencio si no está disponible."""
     try:
         if sys.platform.startswith("linux"):
             subprocess.Popen(
                 ["notify-send", "-a", "Music Grabber", title, message],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         elif sys.platform.startswith("win"):
-            # Balloon tooltip vía PowerShell sin dependencias extra
             ps = (
                 "Add-Type -AssemblyName System.Windows.Forms;"
                 "$n=[System.Windows.Forms.NotifyIcon]::new();"
@@ -48,8 +78,7 @@ def _send_notification(title: str, message: str) -> None:
             )
             subprocess.Popen(
                 ["powershell", "-WindowStyle", "Hidden", "-Command", ps],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
     except Exception:
         pass
@@ -60,7 +89,6 @@ def _send_notification(title: str, message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _log_failure(vid: str, error_text: str) -> None:
-    """Registra un fallo en Failures_Log.txt dentro de la biblioteca."""
     if not state.library_path:
         return
     try:
@@ -79,95 +107,48 @@ def _log_failure(vid: str, error_text: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _save_queue_to_disk() -> None:
-    """Guarda la cola pendiente Y la tarea activa en el disco de forma ATÓMICA."""
     with state.lock:
-        pending_tasks = list(download_queue.queue)
-        data = {
-            "current": state.current_task,
-            "pending": pending_tasks,
-        }
+        pending = list(download_queue.queue)
+        data = {"current": state.current_task, "pending": pending}
+
+    # Lock dedicado a la I/O: dos threads no pueden escribir/renombrar a la vez.
+    # tempfile.mkstemp garantiza un nombre único; os.replace es atómico.
+    with _queue_io_lock:
         try:
-            tmp_file = QUEUE_FILE.with_suffix(".tmp")
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-            tmp_file.replace(QUEUE_FILE)
-        except Exception as e:
-            logger.error(f"Error de E/S al escribir la cola de descargas: {e}")
-
-
-def _rollback_last_download() -> None:
-    """Elimina el último archivo registrado y sus entradas en el historial."""
-    if not state.library_path:
-        return
-
-    base_lib      = Path(state.library_path)
-    ledger_path   = base_lib / "Library_Ledger.log"
-    history_path  = base_lib / ".historial_descargas.txt"
-
-    if not ledger_path.exists():
-        return
-
-    try:
-        with open(ledger_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        if not lines:
-            return
-
-        last_line = lines[-1].strip()
-        match = re.search(r'^youtube ([a-zA-Z0-9_-]{11}) "(.*)"', last_line)
-
-        if match:
-            vid, filepath = match.group(1), match.group(2)
-            file_to_delete = Path(filepath)
-
-            if file_to_delete.exists():
+            APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".queue-", suffix=".tmp", dir=str(APP_DATA_DIR)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+                os.replace(tmp_path, QUEUE_FILE)
+            except Exception:
+                # Si falla algo, limpiar el tmp huérfano
                 try:
-                    file_to_delete.unlink()
-                    logger.warning(f"Rollback físico: archivo eliminado → {file_to_delete.name}")
-                except Exception:
+                    os.unlink(tmp_path)
+                except OSError:
                     pass
-
-            with open(ledger_path, "w", encoding="utf-8") as f:
-                f.writelines(lines[:-1])
-
-            if history_path.exists():
-                with open(history_path, "r", encoding="utf-8") as f:
-                    hist_lines = f.readlines()
-                with open(history_path, "w", encoding="utf-8") as f:
-                    f.writelines([l for l in hist_lines if vid not in l])
-            # Sincronizar también la caché en memoria
-            with state.lock:
-                state.history_cache.discard(vid)
-
-            logger.info("Rollback preventivo completado.")
-    except Exception as e:
-        logger.error(f"Fallo al ejecutar el rollback preventivo: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error al escribir la cola de descargas: {e}")
 
 
 def has_pending_session() -> bool:
-    if QUEUE_FILE.exists():
-        try:
-            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("current") or data.get("pending"):
-                    return True
-        except Exception:
-            pass
-    return False
+    if not QUEUE_FILE.exists():
+        return False
+    try:
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("current") or data.get("pending"))
+    except Exception:
+        return False
 
 
 def load_queue_from_disk(resume_requested: bool = True) -> None:
-    # Limpieza de archivos parciales de yt-dlp al arrancar (solo extensiones inequívocamente temporales)
-    if state.library_path:
-        base_lib = Path(state.library_path)
-        if base_lib.exists():
-            for ext in ["*.part", "*.ytdl"]:
-                for temp_file in base_lib.rglob(ext):
-                    try:
-                        temp_file.unlink()
-                    except Exception:
-                        pass
+    # Limpiar _inbox: cualquier archivo aquí es de procesos anteriores
+    # cortados a mitad. La biblioteca canónica no se toca.
+    _clean_inbox()
 
     if not QUEUE_FILE.exists():
         return
@@ -176,106 +157,96 @@ def load_queue_from_disk(resume_requested: bool = True) -> None:
         if resume_requested:
             with open(QUEUE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             if data.get("current"):
-                logger.warning("Cierre abrupto detectado. Ejecutando Rollback...")
-                _rollback_last_download()
+                logger.warning("Cierre abrupto detectado. Reencolando tarea activa.")
                 download_queue.put(data["current"])
-
             for t in data.get("pending", []):
                 download_queue.put(t)
-
-            logger.info("Cola de sesión recuperada e inyectada.")
+            logger.info("Cola de sesión recuperada.")
         else:
-            logger.info("El usuario ha decidido descartar la sesión anterior.")
+            logger.info("El usuario descartó la sesión anterior.")
 
         QUEUE_FILE.unlink()
         _save_queue_to_disk()
-
     except Exception as e:
         logger.error(f"Fallo al procesar la cola de recuperación: {e}")
+
+
+def _clean_inbox() -> None:
+    if INBOX_DIR.exists():
+        for f in INBOX_DIR.iterdir():
+            try:
+                if f.is_file():
+                    f.unlink()
+            except Exception:
+                pass
+    else:
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
 # Hooks de yt-dlp
 # ---------------------------------------------------------------------------
 
+_SKIP_KEYWORDS = (
+    "video unavailable", "private", "sign in", "members-only", "members only",
+    "this video is not available", "removed by the uploader", "geo restricted",
+    "geo-restricted", "this video is restricted", "video is age restricted",
+    "premieres in", "is not available in your country",
+)
+
+
 class DaemonLogger:
+    """Recoge errores y warnings de yt-dlp y los registra en el event_log."""
+
     def debug(self, msg):   pass
     def info(self, msg):    pass
-    def warning(self, msg): pass
+
+    def warning(self, msg):
+        # yt-dlp envía warnings importantes aquí: "Video unavailable",
+        # "This video is private", "Sign in to confirm your age", etc.
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', msg).strip()
+        lower = clean.lower()
+        if any(kw in lower for kw in _SKIP_KEYWORDS):
+            vid = self._extract_id(clean)
+            label = f" ({vid})" if vid else ""
+            log_event("warn", f"Saltado por yt-dlp{label}: {clean[:120]}")
+            with state.lock:
+                state.global_stats["failed"] += 1
+                state.session_errors.append(clean[:120])
+                if vid:
+                    state.failed_vids.add(vid)
+            if vid:
+                _log_failure(vid, clean[:200])
 
     def error(self, msg):
-        clean_msg = re.sub(r'\x1b\[[0-9;]*m', '', msg).strip()
-
-        error_text = "Fallo desconocido"
-        vid = None
-        match = re.search(r'([a-zA-Z0-9_-]{11}): (.*)', clean_msg)
-
-        if match:
-            vid, raw_err = match.group(1), match.group(2)
-            if "Requested format is not available" in raw_err:
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', msg).strip()
+        vid = self._extract_id(clean)
+        if vid:
+            if "Requested format is not available" in clean:
                 error_text = f"Formato no válido ({vid})"
-            elif "Sign in to confirm" in raw_err:
+            elif "Sign in to confirm" in clean:
                 error_text = f"Restringido/Requiere cuenta ({vid})"
-            elif "Video unavailable" in raw_err or "Private" in raw_err:
+            elif "Video unavailable" in clean or "Private" in clean:
                 error_text = f"Privado/Borrado ({vid})"
             else:
-                error_text = f"Error de extracción ({vid}) - {raw_err[:30]}..."
+                error_text = f"Error de extracción ({vid}) - {clean[:60]}"
             with state.lock:
                 state.failed_vids.add(vid)
         else:
-            if "Requested format is not available" in clean_msg:
-                error_text = "Formato no válido"
-            else:
-                error_text = f"Error general: {clean_msg[:40]}..."
+            error_text = f"Error general: {clean[:80]}"
 
+        log_event("err", error_text)
         with state.lock:
             state.session_errors.append(error_text)
             state.global_stats["failed"] += 1
-
         if vid:
             _log_failure(vid, error_text)
 
-
-def _clean_metadata(info, *args, **kwargs):
-    if state.cancel_requested:
-        return "Protocolo Abortado por el Usuario"
-
-    video_id = info.get("id")
-
-    if info.get("_type") == "playlist" or not video_id or not info.get("title"):
-        return None
-
-    for key in ["artist", "album_artist", "uploader"]:
-        val = info.get(key)
-        if isinstance(val, list) and val:
-            val = str(val[0])
-        if val and isinstance(val, str):
-            info[key] = val.split(",")[0].strip()
-
-    for key in ["playlist_title", "title", "album"]:
-        val = info.get(key)
-        if val and isinstance(val, str) and val.startswith("Album - "):
-            info[key] = val.replace("Album - ", "", 1)
-
-    title = info.get("title", f"Track ({video_id})")
-
-    with state.lock:
-        already_in_cache = any(e.get("id") == video_id for e in state.current_playlist_cache)
-        if not already_in_cache:
-            state.current_playlist_cache.append(info.copy())
-        # Comprobar historial desde la caché en memoria (sin leer archivo)
-        in_history = video_id in state.history_cache
-
-    if in_history:
-        with state.lock:
-            if not already_in_cache:
-                state.global_stats["skipped"] += 1
-                state.recent_finishes.append(("SKIPPED", title))
-        return "El archivo ya está en el historial"
-
-    return None
+    @staticmethod
+    def _extract_id(text: str) -> Optional[str]:
+        m = re.search(r'([a-zA-Z0-9_-]{11})', text)
+        return m.group(1) if m else None
 
 
 def _progress_hook(d):
@@ -290,183 +261,126 @@ def _progress_hook(d):
     if d["status"] == "downloading":
         percent_str = (
             d.get("_percent_str", "0%")
-            .replace("\x1b[0;94m", "")
-            .replace("\x1b[0m", "")
-            .strip()
+            .replace("\x1b[0;94m", "").replace("\x1b[0m", "").strip()
         )
         try:
             percent = float(percent_str.replace("%", ""))
         except ValueError:
             percent = 0.0
-
         with state.lock:
             if video_id not in state.active_downloads:
                 state.active_downloads[video_id] = {"title": track_title}
+                log_event("info", f"Descargando: {track_title}")
             state.active_downloads[video_id]["progress"]      = percent
             state.active_downloads[video_id]["status"]        = "Descargando..."
             state.active_downloads[video_id]["last_progress"] = time.time()
 
     elif d["status"] == "finished":
-        # Guardar ruta esperada para cuando el postprocesado confirme éxito.
-        # El ledger y el historial se escriben en _postprocessor_hook, no aquí,
-        # para evitar registrar archivos cuyo postprocesado (ffmpeg) aún no ha terminado.
-        filepath = d.get("filename")
+        log_event("info", f"Extrayendo audio: {track_title}")
         with state.lock:
             if video_id in state.active_downloads:
-                if filepath:
-                    final_path = str(Path(filepath).with_suffix(f".{state.audio_format}"))
-                    state.active_downloads[video_id]["pending_filepath"] = final_path
-                state.active_downloads[video_id]["progress"] = 95.0
-                state.active_downloads[video_id]["status"]   = "Extrayendo Audio..."
+                state.active_downloads[video_id]["progress"] = 90.0
+                state.active_downloads[video_id]["status"]   = "Extrayendo audio..."
 
 
 def _postprocessor_hook(d: dict) -> None:
+    """Cuando ffmpeg termina la extracción de audio, se apila el path para
+    que el pipeline lo procese al final del download()."""
     info     = d.get("info_dict", {})
     video_id = info.get("id")
     if not video_id:
         return
 
+    pp_name = d.get("postprocessor", "")
+    status  = d.get("status", "")
+
+    if status == "started":
+        with state.lock:
+            if video_id in state.active_downloads:
+                state.active_downloads[video_id]["status"] = f"Procesando: {pp_name}"
+
+    elif status == "finished" and pp_name in ("FFmpegExtractAudio", "MoveFiles"):
+        filepath = info.get("filepath") or d.get("info_dict", {}).get("filepath")
+        if not filepath:
+            return
+        _processed_in_batch.add(video_id)
+        with state.lock:
+            if video_id not in state.active_downloads:
+                state.active_downloads[video_id] = {}
+            state.active_downloads[video_id]["pending_filepath"] = filepath
+            state.active_downloads[video_id]["progress"] = 95.0
+            state.active_downloads[video_id]["status"]   = "Audio extraído"
+
+        # Procesar el archivo en cuanto está listo, sin esperar al resto del lote.
+        # Si MB está apagado es casi instantáneo; si está activo, espera el rate
+        # limit de MB pero la siguiente pista de yt-dlp arranca en paralelo.
+        threading.Thread(
+            target=_process_one_track,
+            args=(video_id, filepath),
+            daemon=True,
+        ).start()
+
+
+def _process_one_track(video_id: str, filepath: str) -> None:
+    """Procesa un solo archivo recién extraído por ffmpeg con el pipeline."""
+    path = Path(filepath)
+    with state.lock:
+        data = dict(state.active_downloads.get(video_id, {}))
+        if data.get("processed"):
+            return
+
+    base_meta = {
+        "title":    data.get("yt_title")    or path.stem,
+        "artist":   data.get("yt_artist")   or "",
+        "album":    data.get("yt_album")    or "",
+        "duration": data.get("yt_duration"),
+        "isrc":     data.get("yt_isrc"),
+    }
+    try:
+        final_path, applied, status_text = pipeline.process_new_download(path, base_meta)
+    except Exception as e:
+        logger.error(f"Pipeline falló para {path.name}: {e}")
+        log_event("err", f"Pipeline falló: {path.name} — {e}")
+        return
+
     with state.lock:
         if video_id in state.active_downloads:
-            if d["status"] == "started":
-                pp_name = d.get("postprocessor", "Procesador")
-                state.active_downloads[video_id]["status"]   = f"Cocinando: {pp_name}..."
-                state.active_downloads[video_id]["progress"] = 99.0
-
-            elif d["status"] == "finished":
-                pp_name = d.get("postprocessor", "")
-                if pp_name in ["Metadata", "FFmpegMetadata", "MoveFiles"]:
-                    state.active_downloads[video_id]["progress"] = 100.0
-                    state.active_downloads[video_id]["status"]   = "¡Completado!"
-
-                    if not state.active_downloads[video_id].get("notified"):
-                        state.active_downloads[video_id]["notified"] = True
-                        track_title  = state.active_downloads[video_id].get("title", "Track desconocido")
-                        original_url = info.get("webpage_url", "")
-                        pending_path = state.active_downloads[video_id].get("pending_filepath")
-
-                        # Registrar en ledger e historial solo cuando el postprocesado está confirmado.
-                        # Así evitamos entradas huérfanas si ffmpeg falla a mitad.
-                        if pending_path and state.library_path:
-                            base_lib    = Path(state.library_path)
-                            ledger_path = base_lib / "Library_Ledger.log"
-                            line        = f'youtube {video_id} "{pending_path}"\n'
-                            try:
-                                content = ledger_path.read_text(encoding="utf-8") if ledger_path.exists() else ""
-                                if video_id not in content:
-                                    with open(ledger_path, "a", encoding="utf-8") as f:
-                                        f.write(line)
-                            except Exception:
-                                pass
-                            try:
-                                history_path = base_lib / ".historial_descargas.txt"
-                                with open(history_path, "a", encoding="utf-8") as f:
-                                    f.write(f"youtube {video_id}\n")
-                            except Exception:
-                                pass
-                            # Actualizar caché en memoria para el resto de la sesión
-                            state.history_cache.add(video_id)
-
-                        state.recent_finishes.append((track_title, original_url))
-                        state.global_stats["success"] += 1
+            state.active_downloads[video_id]["processed"] = True
+            state.active_downloads[video_id]["progress"]  = 100.0
+            state.active_downloads[video_id]["status"]    = (
+                "¡Completado!" if applied or "OK" in status_text else status_text
+            )
+        state.global_stats["success"] += 1
+        title_short = base_meta["title"][:60]
+        if applied:
+            state.recent_finishes.append((title_short, str(final_path)))
+        elif "OK" in status_text:
+            state.recent_finishes.append((title_short, str(final_path)))
+        else:
+            state.recent_finishes.append(("REVIEW", title_short))
 
 
 # ---------------------------------------------------------------------------
-# Generación de M3U8
+# Opciones yt-dlp
 # ---------------------------------------------------------------------------
 
-def generate_m3u8(playlist_title: str, mode: str, library_path: str):
-    if mode not in ["3", "4"]:
-        return
-    if not state.current_playlist_cache:
-        return
+def _get_ydl_opts(speed: str) -> dict:
+    ext = state.audio_format
+    outtmpl = str(INBOX_DIR / "%(id)s - %(title).80s.%(ext)s")
 
-    p_name       = sanitize_filename(playlist_title.replace("Album - ", "", 1), restricted=False)
-    playlists_dir = Path(library_path) / "_Playlist"
-    playlists_dir.mkdir(parents=True, exist_ok=True)
-    m3u_file = playlists_dir / f"{p_name}.m3u8"
-
-    ledger_db   = {}
-    ledger_path = Path(library_path) / "Library_Ledger.log"
-    if ledger_path.exists():
-        content = ledger_path.read_text(encoding="utf-8")
-        for match in re.finditer(r'^youtube ([a-zA-Z0-9_-]{11}) "(.*)"', content, re.MULTILINE):
-            ledger_db[match.group(1)] = Path(match.group(2))
-
-    try:
-        with open(m3u_file, "w", encoding="utf-8") as f:
-            f.write("#EXTM3U\n")
-            for entry in state.current_playlist_cache:
-                video_id   = entry.get("id")
-                raw_artist = str(entry.get("artist") or entry.get("uploader") or "NA").split(",")[0].strip()
-                raw_title  = entry.get("title", "Track")
-                duration   = int(entry.get("duration", 0))
-
-                f.write(f"#EXTINF:{duration},{raw_artist} - {raw_title}\n")
-
-                if video_id in ledger_db:
-                    abs_path = ledger_db[video_id]
-                    try:
-                        rel_path_str = Path(os.path.relpath(abs_path, playlists_dir)).as_posix()
-                    except ValueError:
-                        rel_path_str = abs_path.as_posix()
-                else:
-                    artist    = sanitize_filename(raw_artist, restricted=False)
-                    title     = sanitize_filename(raw_title, restricted=False)
-                    raw_album = (entry.get("album") or "Singles").replace("Album - ", "", 1)
-                    raw_year  = str(entry.get("release_year") or entry.get("upload_date", "0000"))[:4]
-
-                    if mode == "3":
-                        rel_path = Path("..") / artist / f"{raw_year} - {sanitize_filename(raw_album, restricted=False)}" / f"{title}.{state.audio_format}"
-                    elif mode == "4":
-                        rel_path = Path("..") / "_Mix" / p_name / f"{title}.{state.audio_format}"
-                    else:
-                        rel_path = Path("..") / artist / p_name / f"{title}.{state.audio_format}"
-
-                    rel_path_str = rel_path.as_posix()
-
-                f.write(f"{rel_path_str}\n")
-
-        with state.lock:
-            state.recent_finishes.append(("M3U8", p_name))
-    except Exception as e:
-        logger.error(f"Fallo al generar M3U8 para {p_name}: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Opciones de yt-dlp
-# ---------------------------------------------------------------------------
-
-def _get_ydl_opts(mode: str, speed: str) -> dict:
-    base_lib = Path(state.library_path)
-    base     = str(base_lib) + "/"
-    ext      = state.audio_format
-
-    idx_fmt = "%(playlist_index&{} - |)s"
-
-    templates = {
-        "1": base + "%(artist)s/%(release_year,upload_date.0:4)s - %(playlist_title,Album)s/" + idx_fmt + f"%(title)s.%(ext)s",
-        "2": base + "Varios Artistas/%(playlist_title,Recopilatorio)s/" + idx_fmt + f"%(artist)s - %(title)s.%(ext)s",
-        "3": base + "%(artist)s/%(release_year,upload_date.0:4)s - %(album,Singles)s/%(title)s.%(ext)s",
-        "4": base + "_Mix/%(playlist_title,Mix Pleno)s/%(title)s.%(ext)s",
-        "5": base + "%(uploader,Artista)s/%(playlist_title,Album)s/" + idx_fmt + f"%(title)s.%(ext)s",
-        "6": base + f"_Huérfanos/%(title)s.%(ext)s",
-    }
-
-    opts = {
+    opts: dict = {
         "format":              "bestaudio/best",
         "quiet":               True,
         "no_warnings":         True,
         "ignoreerrors":        True,
         "nooverwrites":        True,
         "extract_flat":        False,
-        "allow_playlist_files": False,
-        "outtmpl":             templates.get(mode, templates["6"]),
+        "outtmpl":             outtmpl,
         "ffmpeg_location":     get_ffmpeg_path(),
-        "match_filter":        _clean_metadata,
         "logger":              DaemonLogger(),
         "progress_hooks":      [_progress_hook],
         "postprocessor_hooks": [_postprocessor_hook],
+        "match_filter":        _attach_meta_filter,
         "socket_timeout":      30,
     }
 
@@ -478,21 +392,11 @@ def _get_ydl_opts(mode: str, speed: str) -> dict:
     if ext == "flac":
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
     elif ext == "ogg":
-        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "vorbis", "preferredquality": state.audio_quality}]
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "vorbis",
+                                    "preferredquality": state.audio_quality}]
     else:
-        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": state.audio_quality}]
-
-    if mode != "6":
-        opts["writethumbnail"] = True
-        opts["postprocessors"] += [
-            {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-            {"key": "EmbedThumbnail"},
-            {"key": "FFmpegMetadata", "add_metadata": True},
-        ]
-        opts["postprocessor_args"] = {
-            "thumbnailsconvertor": ["-vf", "crop=ih:ih"],
-            "ffmpeg":              ["-id3v2_version", "3"],
-        }
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
+                                    "preferredquality": state.audio_quality}]
 
     return opts
 
@@ -502,6 +406,9 @@ def _get_ydl_opts(mode: str, speed: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _worker_loop():
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    library.init_db()
+
     while state.is_running:
         try:
             task = download_queue.get(timeout=1.0)
@@ -513,76 +420,82 @@ def _worker_loop():
 
         _save_queue_to_disk()
 
-        url, mode, speed = task.get("url"), task.get("mode"), task.get("speed")
+        url   = task.get("url")
+        speed = task.get("speed", "2")
 
         try:
-            # Cargar historial en caché de memoria para esta tarea.
-            # Evita leer el archivo una vez por pista en playlists grandes.
-            if state.library_path:
-                _hist_path = Path(state.library_path) / ".historial_descargas.txt"
-                try:
-                    if _hist_path.exists():
-                        content = _hist_path.read_text(encoding="utf-8")
-                        loaded = {
-                            parts[1]
-                            for line in content.splitlines()
-                            if line.startswith("youtube ")
-                            for parts in [line.split()]
-                            if len(parts) >= 2
-                        }
-                    else:
-                        loaded = set()
-                except Exception:
-                    loaded = set()
-                with state.lock:
-                    state.history_cache = loaded
-
             with state.lock:
                 state.cancel_requested = False
                 state.session_status   = "SCANNING // ANALIZANDO ENLACE..."
-                state.current_playlist_cache.clear()
-
                 if state.session_start_time == 0.0:
                     state.session_start_time = time.time()
                 state.global_stats["start_time"] = time.time()
+                state.active_downloads.clear()
 
-            with yt_dlp.YoutubeDL(_get_ydl_opts(mode, speed)) as ydl:
-                info         = ydl.extract_info(url, download=False)
-                parent_title = info.get("title", "Enlace")
+            _attempted_in_batch.clear()
+            _processed_in_batch.clear()
+            # Snapshot de stats al inicio del lote para poder calcular diferencias
+            with state.lock:
+                stats_at_start = dict(state.global_stats)
+                stats_at_start.setdefault("duplicates", 0)
+            batch_start_ts = time.time()
+            batch_failures_log: list[str] = []
+
+            log_event("info", f"Analizando enlace: {url[:80]}")
+
+            with yt_dlp.YoutubeDL(_get_ydl_opts(speed)) as ydl:
+                # process=False evita visitar cada entrada antes de descargar.
+                try:
+                    head = ydl.extract_info(url, download=False, process=False)
+                except Exception as e:
+                    head = None
+                    log_event("warn", f"No se pudo leer cabecera: {e}")
+                parent_title = (head.get("title") if head else None) or "Enlace"
+                webpage_url  = (head.get("webpage_url") if head else None) or url
 
                 with state.lock:
                     if not state.cancel_requested:
-                        state.session_status = "LINKED // DESCARGANDO LOTE..."
-                        webpage_url = info.get("webpage_url", url)
+                        state.session_status = "LINKED // DESCARGANDO..."
                         state.recent_finishes.append(("PARENT_LINK", parent_title, webpage_url))
+
+                log_event("info", f"Lista detectada: {parent_title}")
 
                 if not state.cancel_requested:
                     ydl.download([url])
 
-                if not state.cancel_requested:
-                    generate_m3u8(parent_title, mode, state.library_path)
+            # Esperar a que las pistas individuales (procesadas en threads)
+            # terminen el pipeline antes de cerrar el lote.
+            if not state.cancel_requested:
+                _wait_for_pipeline_completion()
+                _count_silent_failures()
 
             with state.lock:
                 elapsed = time.time() - state.global_stats["start_time"]
-                state.session_status                 = "ABORTED // DETENIDO" if state.cancel_requested else "COMPLETED // FINALIZADO"
-                state.global_stats["total_time"]     = f"{elapsed:.1f}s"
-                state.global_stats["start_time"]     = 0.0
-                state.pending_queue_count            = download_queue.qsize()
-                state.current_task                   = None
+                state.session_status = (
+                    "ABORTED // DETENIDO" if state.cancel_requested else "COMPLETED // FINALIZADO"
+                )
+                state.global_stats["total_time"] = f"{elapsed:.1f}s"
+                state.global_stats["start_time"] = 0.0
+                state.pending_queue_count        = download_queue.qsize()
+                state.current_task               = None
 
             if not state.cancel_requested:
+                _emit_batch_summary(stats_at_start, batch_start_ts)
                 s = state.global_stats
                 _send_notification(
                     "Music Grabber — Lote completado",
-                    f"✅ {s['success']}  ⏭ {s['skipped']}  ❌ {s['failed']}"
+                    f"✅ {s['success']}  ❌ {s['failed']}",
                 )
 
             _save_queue_to_disk()
 
         except Exception as e:
+            logger.error(f"Fallo en worker: {e}", exc_info=True)
             with state.lock:
-                state.current_task    = None
-                state.session_status  = "ABORTED // DETENIDO" if state.cancel_requested else "ERROR // FALLIDO"
+                state.current_task   = None
+                state.session_status = (
+                    "ABORTED // DETENIDO" if state.cancel_requested else "ERROR // FALLIDO"
+                )
                 if not state.cancel_requested:
                     state.global_stats["failed"] += 1
                     state.session_errors.append(f"Fallo del sistema: {str(e)[:50]}...")
@@ -590,7 +503,7 @@ def _worker_loop():
             _save_queue_to_disk()
 
         finally:
-            time.sleep(3)
+            time.sleep(2)
             with state.lock:
                 if state.cancel_requested:
                     while not download_queue.empty():
@@ -600,33 +513,132 @@ def _worker_loop():
                         except Exception:
                             break
 
-                # Limpiar solo archivos inequívocamente temporales de yt-dlp.
-                # NO incluir .webp, .vtt, .srt ni otros que puedan ser archivos legítimos del usuario.
-                try:
-                    base_lib = Path(state.library_path)
-                    for ext in ["*.part", "*.ytdl"]:
-                        for temp_file in base_lib.rglob(ext):
-                            try:
-                                temp_file.unlink()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                state.active_downloads.clear()
+                state.session_status = "READY // SISTEMA EN ESPERA"
 
-                for k in list(state.active_downloads.keys()):
-                    state.active_downloads.pop(k, None)
-                if not state.active_downloads:
-                    state.session_status = "READY // SISTEMA EN ESPERA"
+                # Si la cola se vacía, parar el reloj acumulado de sesión.
+                # Vuelve a arrancar en la próxima tarea (state.session_start_time == 0.0).
+                if download_queue.empty():
+                    state.session_start_time = 0.0
 
+            _clean_inbox()
             download_queue.task_done()
 
+
+def _attach_meta_filter(info, *args, **kwargs):
+    """match_filter de yt-dlp: registra metadatos en state para que el
+    pipeline los tenga disponibles. Siempre devuelve None (no filtra).
+    También cuenta la pista como 'intentada' para detectar fallos silenciosos."""
+    if state.cancel_requested:
+        return "Protocolo Abortado por el Usuario"
+
+    vid = info.get("id")
+    if not vid:
+        return None
+    if info.get("_type") == "playlist":
+        return None
+
+    _attempted_in_batch.add(vid)
+
+    # yt-dlp puede dar 'artist' como str o lista
+    raw_artist = info.get("artist") or info.get("uploader") or ""
+    if isinstance(raw_artist, list) and raw_artist:
+        raw_artist = raw_artist[0]
+    raw_artist = str(raw_artist).split(",")[0].strip()
+
+    title = info.get("title", "")
+    album = info.get("album", "") or ""
+    if album.startswith("Album - "):
+        album = album[len("Album - "):]
+
+    with state.lock:
+        if vid not in state.active_downloads:
+            state.active_downloads[vid] = {"title": title}
+        state.active_downloads[vid]["yt_title"]    = title
+        state.active_downloads[vid]["yt_artist"]   = raw_artist
+        state.active_downloads[vid]["yt_album"]    = album
+        state.active_downloads[vid]["yt_duration"] = info.get("duration")
+        state.active_downloads[vid]["yt_isrc"]     = info.get("isrc")
+
+    return None
+
+
+def _wait_for_pipeline_completion(timeout_s: int = 120) -> None:
+    """Espera a que todas las pistas en active_downloads terminen el pipeline.
+    Necesario porque _process_one_track corre en threads independientes."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        with state.lock:
+            pending = [
+                vid for vid, d in state.active_downloads.items()
+                if d.get("pending_filepath") and not d.get("processed")
+            ]
+        if not pending:
+            return
+        time.sleep(0.5)
+    log_event("warn", f"Timeout esperando pipeline de {len(pending)} pista(s)")
+
+
+def _emit_batch_summary(stats_at_start: dict, batch_start_ts: float) -> None:
+    """Emite al log_event un resumen del lote: tiempo, éxitos, fallos, duplicados,
+    y la lista de errores ocurridos."""
+    elapsed = time.time() - batch_start_ts
+    mm, ss = divmod(int(elapsed), 60)
+    hh, mm = divmod(mm, 60)
+    time_str = f"{hh}h {mm:02d}m {ss:02d}s" if hh else (f"{mm}m {ss:02d}s" if mm else f"{ss}s")
+
+    with state.lock:
+        s = state.global_stats
+        d_success    = s.get("success", 0) - stats_at_start.get("success", 0)
+        d_failed     = s.get("failed",  0) - stats_at_start.get("failed",  0)
+        d_duplicates = s.get("duplicates", 0) - stats_at_start.get("duplicates", 0)
+        last_errors  = list(state.session_errors)[-d_failed:] if d_failed > 0 else []
+
+    log_event("info", "─" * 50)
+    log_event("info", "Resumen del lote")
+    log_event("info", f"  Tiempo:     {time_str}")
+    log_event("ok",   f"  Descargas:  {d_success}")
+    if d_duplicates:
+        log_event("warn", f"  Duplicados: {d_duplicates}  (guardados con ' (N)' añadido al nombre)")
+    if d_failed:
+        log_event("err", f"  Fallos:     {d_failed}")
+        for err in last_errors[:8]:
+            log_event("err", f"    · {err[:120]}")
+        if len(last_errors) > 8:
+            log_event("err", f"    · ... y {len(last_errors) - 8} más (ver Failures_Log.txt)")
+    log_event("info", "─" * 50)
+
+
+def _count_silent_failures() -> None:
+    """yt-dlp con ignoreerrors=True puede saltarse vídeos (privados, geo-bloqueados,
+    'sign in to confirm'...) sin pasar por DaemonLogger.error. Comparamos las
+    pistas que entraron al match_filter con las que terminaron extracción para
+    detectar esas pérdidas y contabilizarlas."""
+    missed = _attempted_in_batch - _processed_in_batch
+    if not missed:
+        return
+    with state.lock:
+        state.global_stats["failed"] += len(missed)
+        for vid in missed:
+            state.session_errors.append(f"Saltado por yt-dlp: {vid}")
+            _log_failure(vid, "Saltado por yt-dlp (probable restricción geográfica / privado / requiere sesión)")
+
+
+# ---------------------------------------------------------------------------
+# API pública
+# ---------------------------------------------------------------------------
 
 def start_download_worker():
     threading.Thread(target=_worker_loop, daemon=True).start()
 
 
-def add_download(url: str, mode: str, speed: str):
-    download_queue.put({"url": url, "mode": mode, "speed": speed})
+def add_download(url: str, speed: str = "2", mode=None):
+    """
+    Encola una URL para descarga.
+    `mode` se acepta por compatibilidad con código antiguo y se ignora;
+    en v2.0 ya no hay modos manuales.
+    """
+    download_queue.put({"url": url, "speed": speed})
     with state.lock:
         state.pending_queue_count = download_queue.qsize()
     _save_queue_to_disk()

@@ -2,26 +2,27 @@
   <img src="assets/logo.png" width="400" alt="Music Grabber Logo">
 </p>
 
-# ◢◤ Music Grabber v1.1.1
+# Music Grabber
 
-**Music Grabber** es un orquestador de preservación digital diseñado para gestionar descargas de música con una arquitectura técnica resiliente y una interfaz TUI (Terminal User Interface) de estética cyberpunk.
+**Music Grabber** es una aplicación de escritorio para descargar música de YouTube y YouTube Music, organizarla automáticamente con MusicBrainz y gestionar tu biblioteca local. Sin suscripciones, sin DRM y sin enviar datos a terceros.
 
 Compatible con **Linux** (Fedora/Nobara, Ubuntu/Debian/Mint, Arch/Manjaro, openSUSE y derivadas) y **Windows 10/11**.
 
-## ✨ Características
+> v2.0 en desarrollo activo. La fase 1 (pipeline MusicBrainz + biblioteca + bandeja de revisión + escaneo y enriquecimiento de pistas existentes) está implementada. Reproductor integrado, app Android y sincronización vienen en fases posteriores. Ver `SESION_ACTUAL.md`.
 
-* **6 Modos de Orquestación:** Álbum, Recopilatorio, Playlist, Mix, Discografía y Huérfano. Cada modo genera una estructura de carpetas y nombres de archivo distinta.
-* **Formatos de audio configurables:** MP3 (128 / 192 / 256 / 320 kbps), FLAC sin pérdida y OGG Vorbis. Cambiables desde F2 sin salir de la app.
-* **Bootstrap Híbrido:** Detecta `yt-dlp` y `ffmpeg` del sistema; si no existen, los descarga y los mantiene actualizados automáticamente.
-* **Arquitectura de Resiliencia:** Persistencia atómica de cola y protocolo de Rollback automático ante cierres inesperados.
-* **Gestión Anti-Ban:** Tres perfiles de velocidad (Rápido / Seguro / Nocturno) para evitar bloqueos 403 de YouTube.
-* **Historial integrado:** F4 muestra las últimas 200 descargas directamente en la TUI.
-* **Detección de portapapeles:** Si copias una URL de YouTube con el campo vacío, se pega automáticamente.
-* **Notificaciones de escritorio:** Avisa cuando un batch termina (Linux: `notify-send`; Windows: balloon tooltip).
-* **Registro de fallos:** Las pistas que fallan se guardan en `Failures_Log.txt` con timestamp, URL e ID.
-* **Estadísticas de sesión:** Contador acumulado de descargas, omisiones y fallos; timer de sesión y cola pendiente visibles en todo momento.
+## Características
 
-## 🚀 Instalación
+* **Descarga simple**: pega una URL de YouTube y pulsa Descargar. Sin modos manuales.
+* **Organización automática con MusicBrainz**: tras la descarga, cada pista se enriquece con metadatos canónicos (artista normalizado, álbum, año, género, carátula) y se mueve a `Artista / Año — Álbum / Pista. Título.ext`.
+* **Bandeja de revisión**: las pistas con match ambiguo o sin match se aparcan en una vista dedicada con los candidatos sugeridos; el usuario decide.
+* **Biblioteca integrada**: índice SQLite con todas las pistas. Vista de tabla con filtro en tiempo real. Doble clic para reproducir con el reproductor por defecto del sistema.
+* **Escaneo de biblioteca previa**: si ya tienes música organizada de antes, se indexa sin tocar archivos. Botón "Enriquecer con MusicBrainz" para mejorar metadatos de pistas que no los tengan.
+* **Formatos configurables**: MP3 (128 / 192 / 256 / 320 kbps), FLAC sin pérdida, OGG Vorbis.
+* **Bootstrap híbrido**: detecta `yt-dlp` y `ffmpeg` del sistema; si no existen, los descarga al directorio privado de la app.
+* **Detección de portapapeles**: si copias una URL de YouTube con el campo vacío, se pega automáticamente.
+* **Notificaciones de escritorio** al terminar un lote.
+
+## Instalación
 
 ### Linux (cualquier distribución con Python 3.9+)
 
@@ -64,38 +65,28 @@ Para desinstalar:
 & "$env:LOCALAPPDATA\MusicGrabber\app\install.ps1" -Uninstall
 ```
 
-## 🎯 Uso
+## Uso
 
 ```bash
 musicgrabber
 ```
 
-Al primer arranque la app pide dónde guardar la biblioteca. Después: pega una URL de YouTube o YouTube Music, elige modo y velocidad, y arranca el protocolo. Para lotes, usa F3.
+Al primer arranque la app pide dónde guardar la biblioteca. Después: pega una URL de YouTube o YouTube Music, elige modo y velocidad, y pulsa **Descargar**. Para cargar varias URLs a la vez, usa el botón **Lote**.
 
-### Atajos
-
-| Tecla   | Acción                                       |
-|---------|----------------------------------------------|
-| F1      | Manual e información                         |
-| F2      | Configurar formato, calidad y biblioteca     |
-| F3      | Carga masiva por lotes (batch)               |
-| F4      | Historial de descargas (últimas 200)         |
-| F5      | Reintentar pistas fallidas en Modo Nocturno  |
-| F11     | Alternar cabecera/pie (más espacio vertical) |
-| ESC     | Salir                                        |
-| Ctrl+C  | Cancelar descarga activa / Salir si idle     |
-
-## 📂 Estructura de archivos
+## Estructura de archivos
 
 ```
 MusicGrabber/
 ├── main.py                 # punto de entrada
 ├── core/
-│   ├── state.py            # estado global + rutas cross-platform + configuración
+│   ├── state.py            # estado global + configuración cross-platform
 │   ├── bootstrap.py        # detección/descarga de yt-dlp y ffmpeg
-│   └── downloader.py       # motor de descargas, cola persistente y hooks
+│   ├── downloader.py       # motor de descargas (yt-dlp → _inbox/)
+│   ├── musicbrainz.py      # cliente MusicBrainz + Cover Art Archive
+│   ├── library.py          # índice SQLite + escaneo + bandeja de revisión
+│   └── pipeline.py         # orquestación post-descarga + enriquecimiento
 ├── ui/
-│   └── textual_app.py      # TUI completa (todas las pantallas)
+│   └── gui_app.py          # GUI tkinter (sidebar Descargar/Biblioteca/Sin metadatos)
 ├── assets/                 # logos e iconos
 ├── install.sh              # instalador Linux
 ├── install.ps1             # instalador Windows
@@ -108,27 +99,30 @@ Datos de usuario:
 * **Windows:** `%LOCALAPPDATA%\MusicGrabber\`
 * **macOS:** `~/Library/Application Support/MusicGrabber/` (experimental — `ffmpeg` requiere `brew install ffmpeg`)
 
-Archivos generados en la biblioteca:
+Archivos generados:
 
-| Archivo                  | Contenido                                         |
-|--------------------------|---------------------------------------------------|
-| `Library_Ledger.log`     | Registro de cada descarga (ID, ruta)              |
-| `.historial_descargas.txt` | IDs para detección de duplicados                |
-| `Failures_Log.txt`       | Fallos con timestamp, URL e ID                    |
-| `_Playlist/*.m3u8`       | Playlists generadas en modos 3 y 4               |
+| Archivo                              | Contenido                                              |
+|--------------------------------------|--------------------------------------------------------|
+| `APP_DATA_DIR/library.db`            | Índice SQLite de la biblioteca (v2.0)                  |
+| `APP_DATA_DIR/_inbox/`               | Carpeta temporal para descargas en proceso             |
+| `{biblioteca}/_inbox_review/`        | Pistas con match ambiguo o sin match, a revisar        |
+| `{biblioteca}/Failures_Log.txt`      | Fallos de descarga con timestamp, URL e ID             |
 
-## 🛠️ Tecnologías
+## Tecnologías
 
 * **Lenguaje:** Python 3.9+
-* **Interfaz:** Textual TUI
+* **Interfaz:** tkinter (incluido en la stdlib de Python)
 * **Motores:** yt-dlp + FFmpeg
+* **Metadatos:** MusicBrainz API + Cover Art Archive (datos abiertos, sin clave)
+* **Tags y formato:** mutagen
+* **Índice:** SQLite (stdlib)
 * **Instaladores:** Bash (`install.sh`) y PowerShell (`install.ps1`)
 
-## 📜 Créditos
+## Créditos
 
-* **Arquitectura y Lógica Core:** TeamGrab
-* **Asistencia en Desarrollo y UI/UX:** IA
-* **Librerías de Terceros:** yt-dlp, FFmpeg, Textual
+* **Arquitectura y lógica core:** TeamGrab
+* **Asistencia en desarrollo y UI/UX:** IA
+* **Librerías de terceros:** yt-dlp, FFmpeg
 
 ---
 *Este software ha sido creado con fines educativos y de preservación personal de archivos digitales.*

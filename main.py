@@ -1,22 +1,14 @@
-import sys
 import logging
 from core.state import state
+from ui.gui_app import run_gui
 
 logger = logging.getLogger("Orquestador")
 
 
 def main() -> None:
-    use_tui = "--tui" in sys.argv
-
-    if use_tui:
-        from ui.textual_app import run_tui as run_app
-        logger.info("[Sistema] Arrancando Music Grabber TUI...")
-    else:
-        from ui.gui_app import run_gui as run_app
-        logger.info("[Sistema] Arrancando Music Grabber GUI...")
-
+    logger.info("[Sistema] Arrancando Music Grabber GUI...")
     try:
-        run_app()
+        run_gui()
     except KeyboardInterrupt:
         logger.warning("\n[Sistema] Cierre forzado detectado (Ctrl+C).")
     except Exception as e:

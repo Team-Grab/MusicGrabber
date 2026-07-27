@@ -97,6 +97,16 @@ else
     ok "yt-dlp detectado: $(command -v yt-dlp)"
 fi
 
+if ! command -v vlc >/dev/null 2>&1; then
+    warn "VLC no detectado. El reproductor integrado no funcionará sin él."
+    warn "  Fedora/Nobara: sudo dnf install vlc"
+    warn "  Debian/Ubuntu: sudo apt install vlc"
+    warn "  Arch/Manjaro : sudo pacman -S vlc"
+    warn "Las descargas funcionan sin VLC; solo se desactivan los controles del reproductor."
+else
+    ok "VLC detectado: $(command -v vlc)"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Copia de la app
 # ---------------------------------------------------------------------------
