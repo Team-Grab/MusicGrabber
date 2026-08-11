@@ -1,5 +1,60 @@
 # Changelog — Music Grabber
 
+## v2.0-dev — Auditoría de bugs + Bloque N validado (2026-08-11)
+
+Sesión de auditoría: se revisó el código de cada bug pendiente en
+`Reporte-de-fallos.txt`, se validó D4 y G3 en vivo, y se corrió el Bloque N
+completo (fase 2c.5 v2) con la app real en un entorno aislado (audio real
+generado con ffmpeg, `librosa` instalado, sin mocks de la lógica de negocio).
+
+### Fix — D4: diálogo de búsqueda manual en MusicBrainz se abría en blanco
+
+`ManualMBSearchDialog` (`ui/gui_app.py`) tenía el mismo bug de origen que A4
+(Ajustes) y L2 (Sleep timer) pero nunca había recibido el mismo fix:
+`grab_set()` se llamaba antes de construir los widgets. Movido a un método
+`_build()` bajo `try/except`, con `grab_set()` al final.
+
+### Bugs nuevos encontrados y corregidos validando el Bloque N
+
+1. **`RangeSlider` rompía el diálogo de Ajustes por completo.** La clase
+   guardaba ancho/alto en `self._w` / `self._h`, pisando el atributo interno
+   que tkinter usa para la ruta Tcl del widget. Cualquier dibujo posterior
+   (`self.delete("all")`) fallaba con `TclError: invalid command name "240"`.
+   Como el error queda atrapado por el `try/except` de `_build()`, Ajustes
+   abría pero **sin la sección Modo fiesta ni los botones Guardar/Cancelar/
+   Cambiar biblioteca** — no se podía guardar ningún ajuste desde la GUI.
+   Renombrado a `self._w_px` / `self._h_px`.
+2. **El crossfade general no se restauraba con el valor nuevo al salir de
+   fiesta.** `set_party_mode(False)` y `load_queue()` restauraban un
+   crossfade "capturado" al activar la fiesta (`_party_pre_crossfade`), no
+   el vigente. Si cambiabas el crossfade general en Ajustes mientras la
+   fiesta sonaba, al desactivarla volvía al valor viejo. Ahora restaura
+   siempre `state.crossfade_enabled` / `state.crossfade_seconds` en vivo;
+   se eliminó el mecanismo de captura.
+3. **Orden de la columna BPM al revés para pistas sin BPM.** Usaba `-1.0`
+   como valor de orden para "sin BPM calculado", que se comporta como "el
+   más bajo" — quedaban primero en ascendente y al final en descendente, al
+   revés de lo esperado. Cambiado a `float("inf")`.
+
+### Bloque N — validado, sin más bugs
+
+N1 (migración de columna `bpm`), N2 (cálculo automático al descargar, con
+MB on/off y sin librosa), N3 (botón "Calcular BPM" masivo: confirmación,
+progreso, cancelar, "nada que calcular"), N4 (modo fiesta: pool vacío,
+activar con/sin cola previa, autollenado, shuffle sin artistas consecutivos,
+pool agotado, crossfade forzado, desactivar, doble clic durante fiesta), N5
+(range slider + presets + persistencia) y N6 (columna BPM + sort numérico)
+validados sin regresiones.
+
+### G1 — descartado
+
+Descargar contenido de YouTube con restricción de edad requeriría cookies
+de navegador en las opciones de yt-dlp. Ya se probó ese enfoque antes de
+esta sesión y no funcionó bien; se descarta, se documenta como limitación
+conocida en `PLAN_DE_PRUEBAS.md`.
+
+---
+
 ## v2.0-dev — Fase 2c.5 v2 + fix (2026-05-27)
 
 ### Reescritura del modo fiesta (autoplay con pool fresco)

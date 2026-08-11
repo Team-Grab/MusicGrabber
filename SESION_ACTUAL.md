@@ -1,12 +1,12 @@
 # Music Grabber — Sesión actual
 
-Documento maestro de transferencia entre sesiones. Pegar entero al inicio de cualquier sesión nueva. Última actualización: **2026-05-27**.
+Documento maestro de transferencia entre sesiones. Pegar entero al inicio de cualquier sesión nueva. Última actualización: **2026-08-11**.
 
 ---
 
 ## 0. Resumen ejecutivo (para arrancar nueva sesión)
 
-App Python con GUI tkinter que descarga música de YouTube/YouTube Music, organiza la biblioteca local con MusicBrainz y la reproduce con un reproductor integrado VLC. Estado: **fases 1, 2a, 2b, 2c y 2c.4 validadas (bloques A-M). Fase 2c.5 (modo fiesta con BPM via librosa) reescrita el 27/05 como autoplay con autollenado tras feedback de uso; pendiente de validar en bloque N**. Siguiente: 2d (smart playlists + letras LRCLIB).
+App Python con GUI tkinter que descarga música de YouTube/YouTube Music, organiza la biblioteca local con MusicBrainz y la reproduce con un reproductor integrado VLC. Estado: **fases 1, 2a, 2b, 2c, 2c.4 y 2c.5 validadas por completo (bloques A-N)**. El 11/08 se auditaron todos los bugs pendientes del reporte, se validó D4, G3 y el Bloque N entero (modo fiesta v2 + BPM) con la app real corriendo, y se encontraron y arreglaron 3 bugs nuevos que nadie había reportado (Ajustes roto por un choque de nombres en `RangeSlider`, crossfade con valor viejo al salir de la fiesta, orden invertido de la columna BPM). G1 (descargar contenido con restricción de edad) se descartó por decisión del usuario — cookies de navegador ya se probaron antes y no funcionó bien. **No queda ningún bug conocido sin arreglar.** Siguiente: 2d (smart playlists + letras LRCLIB) — ver sección 5.
 
 Si arrancas nueva sesión: lee este documento entero, lee `PLAN_DE_PRUEBAS.md` para saber qué está validado, y `Reporte-de-fallos.txt` para ver los bugs reportados hasta la fecha. Si vas a tocar código, lee también el `CHANGELOG.md` que tiene los detalles técnicos de cada fix.
 
@@ -92,37 +92,36 @@ musicgrabber-linux/
 
 ## 4. Funcionalidades validadas en uso real
 
-Bloques A-K marcados con `[x]` en `PLAN_DE_PRUEBAS.md`.
+Bloques A-N marcados con `[x]` en `PLAN_DE_PRUEBAS.md`. **Todo el plan de pruebas está validado, sin casillas pendientes.**
 
-- **A-I (fase 1)**: setup de bienvenida, descarga con/sin MB, biblioteca con ordenación + filtros (por texto sin acentos, por género desde sidebar, "Limpiar filtros"), menú contextual con 9+ entradas, atajos F5/F2/Enter/Del/Ctrl+D/L/R, MusicBrainz on/off con indicador en barra, enriquecimiento masivo con diálogo de progreso, bandeja de revisión con búsqueda manual + edición manual + candidatos, persistencia de geometría/columnas/vista activa, prune automático del índice al arrancar, "Vaciar índice" como reset duro.
+- **A-I (fase 1)**: setup de bienvenida, descarga con/sin MB, biblioteca con ordenación + filtros (por texto sin acentos, por género desde sidebar, "Limpiar filtros"), menú contextual con 9+ entradas, atajos F5/F2/Enter/Del/Ctrl+D/L/R, MusicBrainz on/off con indicador en barra, enriquecimiento masivo con diálogo de progreso, bandeja de revisión con búsqueda manual + edición manual + candidatos (G3 validado el 11/08 con caso fabricado, nunca se logró un `[ambiguous]` real), persistencia de geometría/columnas/vista activa, prune automático del índice al arrancar, "Vaciar índice" como reset duro.
 - **J (fase 2a)**: reproductor VLC con cola, transporte completo, slider con click + drag + debounce, doble clic carga vista filtrada como cola, menú contextual con cola, auto-advance, `play_count` persistido.
 - **K (fase 2b)**: botones "Mezclar", "Repetir" (off/lista/pista), "Cola" en la barra. Panel de cola con drag & drop preview en vivo. Resumen de lote al terminar descargas.
+- **L (fase 2c)**: shuffle inteligente, sleep timer, ecualizador (bug de preamp/segfault/render en blanco arreglados y validados).
+- **M (fase 2c.4)**: crossfade entre pistas + regresión de EQ combinada.
+- **N (fase 2c.5 v2)**: modo fiesta como autoplay puro — pool sin pistas, sin/con cola previa, autollenado (2 por delante), shuffle inteligente sin artistas consecutivos, pool agotado con rotación, crossfade forzado, desactivar, doble clic en biblioteca durante fiesta; range slider de dos thumbs + 4 presets; migración de la columna `bpm`; cálculo automático y masivo de BPM con librosa; columna BPM en biblioteca con sort numérico correcto. Validado el 11/08 con la app real corriendo en un entorno aislado (audio real generado con ffmpeg, sin mocks de la lógica).
 
 ---
 
-## 5. Pendiente de validar
+## 5. Pendiente
 
-**Bloque N del plan de pruebas (reescrito 27/05)** — entero. Cubre fase 2c.5 v2:
-- N1: migración suave de la columna `bpm` en DB legacy.
-- N2: cálculo automático en el pipeline de descarga.
-- N3: botón "Calcular BPM" masivo con modal de progreso.
-- N4: modo fiesta como autoplay (activar sin cola previa, autollenado, shuffle inteligente, pool fresco, crossfade forzado, salida con stop, doble clic en biblioteca desactiva fiesta).
-- N5: range slider con dos thumbs + 4 presets (Chill, Pop-Rock, Bailable, Cardio).
-- N6: columna BPM visible en la biblioteca con sort numérico.
+**No queda ningún bug ni bloque de testing pendiente.** Lo que sigue es trabajo de roadmap (features nuevas, no fixes):
 
-Requiere `pip install librosa` (ya en `requirements.txt`, `install.sh` lo recoge).
+- **Fase 2d — smart playlists + letras** (siguiente prioridad, ver sección 6): top mensual, recientes, no escuchadas en X meses, BPM alto para entrenamiento, mezcla de géneros favoritos, "hoy hace X años". La base ya existe (`play_count` y `bpm` persistidos en `tracks`), falta la feature. Letras LRCLIB sincronizadas, sin empezar.
+- **Vistas de biblioteca por álbum y por playlist** (de `notas.txt`) — hoy solo hay pista/artista/género. Sin código todavía.
+- **Empaquetado** (de `notas.txt`, agendado "después de v2.0 fase 1"): AppImage, PKGBUILD/AUR, RPM/Copr, DEB/PPA, GitHub Actions para probar `install.sh`/`install.ps1` en cada push. Nada de esto existe aún.
+- **G1 (descargas con restricción de edad)** — descartado, no perseguir: cookies de navegador para yt-dlp ya se probaron antes de esta sesión y no funcionó bien.
+- Android / servidor HTTP / sync offline (fase 3+) — "decidir más adelante", no evaluado todavía.
 
-Bloques A-M validados.
-
-Detalles técnicos en `CHANGELOG.md` (todas las fases, en particular "Fase 2c.5 v2 + fix").
+Detalles técnicos de cada fase en `CHANGELOG.md`.
 
 ---
 
 ## 6. Plan v2.0 — fases siguientes
 
 - **2c.4** — ✅ Implementado el 24/05 y validado el 25/05 (bloque M).
-- **2c.5** — ✅ Implementado el 25/05 (pendiente de validar en bloque N). Modo fiesta con BPM calculado en local con librosa. AcousticBrainz cerró en 2022, así que el BPM se calcula al descargar + bajo demanda con botón masivo.
-- **2d** — Smart playlists: top mensual, recientes, no escuchadas en X meses, BPM alto para entrenamiento, mezcla de géneros favoritos, "hoy hace X años". Reglas combinables. Letras LRCLIB sincronizadas.
+- **2c.5** — ✅ Implementado el 25/05, reescrito v2 el 27/05, **validado el 11/08 (bloque N completo)**. Modo fiesta con BPM calculado en local con librosa. AcousticBrainz cerró en 2022, así que el BPM se calcula al descargar + bajo demanda con botón masivo.
+- **2d** — ⬅ **Siguiente.** Smart playlists: top mensual, recientes, no escuchadas en X meses, BPM alto para entrenamiento, mezcla de géneros favoritos, "hoy hace X años". Reglas combinables. Letras LRCLIB sincronizadas. Base de datos ya lista (`play_count`, `bpm`); falta la feature entera.
 - **2e** — Scrobbling Last.fm opcional.
 - **3+** — Servidor HTTP + Android. Sync offline. Acceso remoto. Android Auto.
 
@@ -145,6 +144,9 @@ Detalles técnicos en `CHANGELOG.md` (todas las fases, en particular "Fase 2c.5 
 - **Bucle de `save_config`**: si `_switch_view` se llama desde el handler de `<<TreeviewSelect>>` que se disparó por `selection_set` programático, se encadena. Solución: early-return si la vista no cambia + flag con `after_idle`.
 - **Emojis Unicode** (🔀 🔁 📋) requieren fuente con soporte de emoji en la cadena de fallback tkinter. En Fedora vainilla no aparecen. **Usar texto** (" Mezclar ", " Repetir ", " Cola "). Los símbolos Misc Technical (⏮ ▶ ⏸ ⏭ ■) sí están en fuentes default.
 - **Polling del portapapeles** cada 2 s provoca parpadeos en KDE/Wayland Nobara. Eliminado del todo; Ctrl+V manual sigue funcionando.
+- **NUNCA nombrar un atributo propio `self._w` o `self._h` en una subclase de `tk.Canvas`/`tk.Widget`**: tkinter ya usa `self._w` internamente para la ruta Tcl del widget. Pisarlo rompe cualquier llamada posterior (`self.delete`, `self.create_*`, ...) con `TclError: invalid command name "<lo que le hayas asignado>"`. Encontrado en `RangeSlider` (`self._w = int(width)` rompía TODO el diálogo Ajustes, incluidos los botones Guardar/Cancelar, porque el error quedaba atrapado por el `try/except` de `_build()` sin dar pista visual de qué había fallado). Usar nombres tipo `self._w_px`.
+- **Restaurar config "previa" tras un modo temporal (ej. fiesta) debe leer el valor VIGENTE, no uno capturado al activar**: si el usuario cambia esa config mientras el modo temporal está activo, capturar-y-restaurar deja el cambio sin efecto hasta el próximo reinicio de la app. Para "volver a la configuración general" al salir de un modo temporal, leer siempre `state.<campo>` en el momento de restaurar, no una copia guardada al entrar.
+- **Sort de columnas con valores ausentes (BPM sin calcular, etc.)**: usar `float("inf")` como placeholder de "no tiene valor", NUNCA `-1` o un negativo pensando en "que quede al final". `-1` se comporta como el valor MÁS BAJO (queda primero en ascendente), justo lo contrario de lo esperado si el usuario espera "sin dato" al final.
 
 ---
 
@@ -185,7 +187,7 @@ sudo dnf install vlc
 
 ### Siguiente paso prioritario
 
-Validar el bloque N (2c.5). Si pasa:
-- Pasar a 2d (smart playlists + letras LRCLIB). Aprovecha play_count + BPM ya disponibles en la DB.
-
-Si N falla, anotar en `Reporte-de-fallos.txt` y arreglar antes de seguir.
+Bloque N validado el 11/08 — **no queda testing pendiente**. Arrancar la fase
+**2d** (smart playlists + letras LRCLIB). Aprovecha `play_count` + `bpm` ya
+disponibles en la DB. Ver sección 5 para el resto de trabajo de roadmap
+(vistas álbum/playlist, empaquetado) si 2d no es la prioridad del usuario.
