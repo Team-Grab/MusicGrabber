@@ -62,10 +62,19 @@ Para esto, MB debe estar OFF (verifica en el indicador superior).
 
 ## Bloque D — Menú contextual y edición manual
 
+**Nota (11/08/2026):** D4 se reportó con dos fallos independientes: (a) el
+diálogo se abría en blanco/vacío hasta redimensionar la ventana, (b) el
+tamaño fijo tapaba los botones "Aplicar candidato" y "Cancelar". Causa: en
+`ManualMBSearchDialog` (`ui/gui_app.py:605-668`) se llamaba `grab_set()`
+antes de construir los widgets — mismo patrón que causó los bugs de A4
+(Ajustes) y L2 (Sleep timer). Corregido en el commit `53c8962` moviendo la
+construcción de widgets a un método `_build()` bajo `try/except`, con
+`grab_set()` al final. Pendiente de validar en uso, casilla desmarcada.
+
 - [x] **D1. Click derecho** sobre una pista en la biblioteca abre menú con: Reproducir, Editar tags, Buscar en MB, Reenriquecer, Abrir carpeta, Quitar del índice, Eliminar archivo.
 - [x] **D2. Reproducir.** Lanza el reproductor por defecto del sistema con esa pista.
 - [x] **D3. Editar tags a mano.** Abre diálogo con campos Title/Artist/Album/Year/Track/Genre rellenos con los valores actuales. Cambia el título, pulsa Guardar. La tabla se actualiza.
-- [x] **D4. Buscar en MB manualmente.** Abre diálogo con título y artista editables. Pulsa "Buscar en MusicBrainz". Aparecen candidatos (puede tardar 1 s). Selecciona uno y pulsa "Aplicar candidato". La pista pasa a tener ✦ en la columna MB.
+- [ ] **D4. Buscar en MB manualmente.** Abre diálogo con título y artista editables (debe abrirse con contenido visible de inmediato, sin necesidad de redimensionar). Pulsa "Buscar en MusicBrainz". Aparecen candidatos (puede tardar 1 s). Selecciona uno y pulsa "Aplicar candidato". La pista pasa a tener ✦ en la columna MB.
 - [x] **D5. Abrir carpeta contenedora.** Abre el navegador de archivos en la carpeta de la pista.
 - [x] **D6. Quitar del índice.** Pide confirmación. Si aceptas, la pista desaparece de la tabla pero el archivo físico sigue ahí.
 - [x] **D7. Eliminar archivo del disco.** Pide confirmación con icono de warning. Si aceptas, el archivo desaparece de disco Y de la tabla.
@@ -335,6 +344,17 @@ rm -f ~/.local/share/MusicGrabber/library.db
 - [ ] **N6.1.** Vista Biblioteca: la tabla tiene una columna "BPM" entre "MB" y "Duración".
 - [ ] **N6.2.** Pistas con BPM calculado muestran el valor (ej. "128"). Pistas sin BPM muestran vacío.
 - [ ] **N6.3.** Click en el header "BPM" ordena numéricamente (ascendente con ▲, click otra vez para descendente ▼). Las pistas sin BPM quedan al final en asc, al principio en desc.
+
+---
+
+## Limitaciones conocidas (no son bugs de código)
+
+- **Contenido con restricción de edad.** Vídeos que YouTube marca como
+  contenido infantil/restringido no se pueden descargar
+  (`core/downloader.py:191-195` detecta y loguea el fallo, pero no hay
+  soporte de cookies de navegador en las opciones de yt-dlp). Añadirlo es
+  una decisión de producto pendiente (fricción/privacidad de pedir cookies
+  del navegador vs. poder descargar ese contenido), no un fix de una línea.
 
 ---
 
