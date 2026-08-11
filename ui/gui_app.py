@@ -613,11 +613,25 @@ class ManualMBSearchDialog(tk.Toplevel):
         self.minsize(640, 480)
         _dark_toplevel(self)
         self.transient(parent)
-        self.grab_set()
         self._parent = parent
         self._path = track_path
         self._candidates: list[dict] = []
+        self._initial_title = initial_title
+        self._initial_artist = initial_artist
+        # IMPORTANTE: construir widgets ANTES de grab_set / center_on.
+        # En el orden contrario, en algunas combinaciones tcl/tk el grab
+        # bloquea el render y la ventana sale vacía hasta redimensionar.
+        try:
+            self._build()
+        except Exception as e:
+            import traceback
+            log_event("err", f"ManualMBSearchDialog._build: {e}")
+            traceback.print_exc()
+        self.update_idletasks()
+        _center_on(self, parent)
+        self.grab_set()
 
+    def _build(self):
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
 
@@ -625,13 +639,13 @@ class ManualMBSearchDialog(tk.Toplevel):
         row = ttk.Frame(frm)
         row.pack(fill="x", pady=(0, 8))
         ttk.Label(row, text="Título:", width=10).pack(side="left")
-        self._title_var = tk.StringVar(value=initial_title)
+        self._title_var = tk.StringVar(value=self._initial_title)
         ttk.Entry(row, textvariable=self._title_var).pack(side="left", fill="x", expand=True)
 
         row = ttk.Frame(frm)
         row.pack(fill="x", pady=(0, 8))
         ttk.Label(row, text="Artista:", width=10).pack(side="left")
-        self._artist_var = tk.StringVar(value=initial_artist)
+        self._artist_var = tk.StringVar(value=self._initial_artist)
         ttk.Entry(row, textvariable=self._artist_var).pack(side="left", fill="x", expand=True)
 
         ttk.Button(frm, text="Buscar en MusicBrainz",
@@ -654,8 +668,6 @@ class ManualMBSearchDialog(tk.Toplevel):
         btn.pack(fill="x")
         ttk.Button(btn, text="Aplicar candidato", command=self._apply).pack(side="left")
         ttk.Button(btn, text="Cancelar", command=self.destroy).pack(side="right")
-
-        _center_on(self, parent)
 
     def _do_search(self):
         title  = self._title_var.get().strip()
