@@ -69,12 +69,14 @@ tamaño fijo tapaba los botones "Aplicar candidato" y "Cancelar". Causa: en
 antes de construir los widgets — mismo patrón que causó los bugs de A4
 (Ajustes) y L2 (Sleep timer). Corregido en el commit `53c8962` moviendo la
 construcción de widgets a un método `_build()` bajo `try/except`, con
-`grab_set()` al final. Pendiente de validar en uso, casilla desmarcada.
+`grab_set()` al final. Validado el mismo día instanciando el diálogo real
+y capturando la ventana: todo el contenido visible de inmediato, sin
+redimensionar.
 
 - [x] **D1. Click derecho** sobre una pista en la biblioteca abre menú con: Reproducir, Editar tags, Buscar en MB, Reenriquecer, Abrir carpeta, Quitar del índice, Eliminar archivo.
 - [x] **D2. Reproducir.** Lanza el reproductor por defecto del sistema con esa pista.
 - [x] **D3. Editar tags a mano.** Abre diálogo con campos Title/Artist/Album/Year/Track/Genre rellenos con los valores actuales. Cambia el título, pulsa Guardar. La tabla se actualiza.
-- [ ] **D4. Buscar en MB manualmente.** Abre diálogo con título y artista editables (debe abrirse con contenido visible de inmediato, sin necesidad de redimensionar). Pulsa "Buscar en MusicBrainz". Aparecen candidatos (puede tardar 1 s). Selecciona uno y pulsa "Aplicar candidato". La pista pasa a tener ✦ en la columna MB.
+- [x] **D4. Buscar en MB manualmente.** Abre diálogo con título y artista editables (debe abrirse con contenido visible de inmediato, sin necesidad de redimensionar). Pulsa "Buscar en MusicBrainz". Aparecen candidatos (puede tardar 1 s). Selecciona uno y pulsa "Aplicar candidato". La pista pasa a tener ✦ en la columna MB.
 - [x] **D5. Abrir carpeta contenedora.** Abre el navegador de archivos en la carpeta de la pista.
 - [x] **D6. Quitar del índice.** Pide confirmación. Si aceptas, la pista desaparece de la tabla pero el archivo físico sigue ahí.
 - [x] **D7. Eliminar archivo del disco.** Pide confirmación con icono de warning. Si aceptas, el archivo desaparece de disco Y de la tabla.
@@ -109,7 +111,8 @@ Estando en la vista Biblioteca con una pista seleccionada:
 
 - [x] **G1.** Las pistas listadas vienen con `[ambiguous]` o `[no_match]` entre corchetes.
 - [x] **G2. Selecciona una pista.** En el panel derecho aparecen los candidatos de MusicBrainz (puede estar vacío si fue no_match).
-- [ ] **G3. Aplicar candidato seleccionado.** Si hay candidatos, selecciona uno y aplícalo. La pista desaparece de la bandeja, aparece en la biblioteca con ✦.
+- [x] **G3. Aplicar candidato seleccionado.** Si hay candidatos, selecciona uno y aplícalo. La pista desaparece de la bandeja, aparece en la biblioteca con ✦.
+  **Nota (11/08/2026):** nunca se había podido validar porque no se lograba generar un caso `[ambiguous]` real navegando YouTube. Se probó con un caso fabricado end-to-end (MP3 real + entrada `pending_review` con 2 candidatos insertada directamente en `library.db`, app real corriendo, flujo ejecutado sobre los widgets reales — sin mocks): la pista se seleccionó, los 2 candidatos aparecieron en la tabla, al aplicar el elegido se escribieron los tags en el archivo MP3 real (verificado con mutagen), `mb_recording_id` quedó correcto en `tracks`, la entrada se borró de `pending_review` y la pista apareció en Biblioteca (1) y en Géneros (Pop: 1). Sin bugs encontrados.
 - [x] **G4. Buscar manualmente en MB.** Edita título/artista y pulsa Buscar. Aparecen nuevos candidatos. Aplica uno.
 - [x] **G5. Editar tags a mano.** Edita campos manualmente y guarda. La pista sale de la bandeja.
 - [x] **G6. Dejar como está.** Quita la pista de la bandeja sin tocar tags.
