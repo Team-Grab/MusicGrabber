@@ -229,8 +229,12 @@ class RangeSlider(tk.Canvas):
                          bg=bg or parent.cget("background"))
         self._from = float(from_)
         self._to   = float(to)
-        self._w    = int(width)
-        self._h    = int(height)
+        # OJO: no usar self._w / self._h — tkinter.Widget ya usa self._w
+        # internamente para la ruta Tcl del widget; pisarlo rompe cualquier
+        # llamada posterior (self.delete, self.create_rectangle, ...) con
+        # "invalid command name" porque self._w deja de ser la ruta real.
+        self._w_px = int(width)
+        self._h_px = int(height)
         self._pad  = 12  # margen lateral para que el thumb no se salga
         self._track_color = track
         self._active_color = track_active
@@ -240,9 +244,9 @@ class RangeSlider(tk.Canvas):
         self._max = max(self._min,  min(self._to, float(initial_max)))
         self._dragging = None  # "min" | "max" | None
         # Geometría del track
-        self._ty = self._h // 2
+        self._ty = self._h_px // 2
         self._tx0 = self._pad
-        self._tx1 = self._w - self._pad
+        self._tx1 = self._w_px - self._pad
         self._tw = self._tx1 - self._tx0
         # Bindings
         self.bind("<Button-1>", self._on_click)
@@ -2414,7 +2418,10 @@ class MusicGrabberGUI(tk.Tk):
                 "year": year,   "mb": mb_ok,     "duration": dur,
                 "duration_s": t["duration_s"] or 0,
                 "bpm": bpm_txt,
-                "bpm_v": bpm_val if bpm_val is not None else -1.0,
+                # +inf (no -1) para que las pistas sin BPM queden siempre al
+                # final en ascendente y al principio en descendente, en vez
+                # de "ganar" el orden ascendente como si fueran las más bajas.
+                "bpm_v": bpm_val if bpm_val is not None else float("inf"),
             })
 
         # Ordenar según el estado actual

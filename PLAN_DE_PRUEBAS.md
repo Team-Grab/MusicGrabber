@@ -300,53 +300,87 @@ rm -f ~/.local/share/MusicGrabber/config.json
 rm -f ~/.local/share/MusicGrabber/library.db
 ```
 
+**Nota (11/08/2026):** Bloque N validado end-to-end (agentes automatizados,
+app real corriendo en entorno aislado, con audio real generado con ffmpeg y
+`librosa` instalado). N1-N4 y N6 se probaron llamando directamente a las
+mismas funciones que disparan los botones/atajos reales (`pipeline.process_new_download`,
+`player.set_party_mode`, `_compute_bpm_library`, etc. — el mismo código, sin
+mocks de la lógica), inspeccionando estado real (DB, `state.event_log`,
+archivos en disco) en vez de solo mirar la pantalla. N5 y el modal de N3 sí
+se probaron a través de los widgets reales (`SettingsDialog`, `EnrichProgressDialog`).
+Se encontraron y arreglaron 3 bugs reales en el proceso (no estaban en
+`Reporte-de-fallos.txt`, salieron de esta ronda de pruebas):
+
+1. **RangeSlider rompía el diálogo de Ajustes por completo.** `ui/gui_app.py:232-233`:
+   la clase guardaba el ancho/alto en `self._w`/`self._h`, pisando el atributo
+   interno `self._w` que tkinter usa para la ruta Tcl del widget. Cualquier
+   dibujo posterior (`self.delete("all")`) fallaba con
+   `TclError: invalid command name "240"`. Como el error queda atrapado por
+   el `try/except` de `_build()` (el mismo que arregló A4), Ajustes abría
+   pero **sin la sección Modo fiesta ni los botones Guardar/Cancelar/Cambiar
+   biblioteca** — no se podía guardar NINGÚN ajuste desde la GUI. Arreglado
+   renombrando a `self._w_px`/`self._h_px`.
+2. **El crossfade general no se restauraba con el valor nuevo al salir de fiesta.**
+   `core/player.py`: `set_party_mode(False)` y `load_queue()` restauraban un
+   crossfade "capturado" al activar la fiesta (`_party_pre_crossfade`), no el
+   vigente. Si cambiabas el crossfade general en Ajustes mientras la fiesta
+   sonaba, al desactivarla volvía al valor VIEJO, no al nuevo guardado.
+   Arreglado: ahora restaura siempre `state.crossfade_enabled/seconds` en
+   vivo; se eliminó el mecanismo de captura (`_party_pre_crossfade`), quedó
+   más simple.
+3. **Orden de la columna BPM al revés para pistas sin BPM.** `ui/gui_app.py:2421`:
+   usaba `-1.0` como valor de orden para "sin BPM calculado", que se comporta
+   como "más bajo que cualquier BPM real" — las quedaba PRIMERO en ascendente
+   y AL FINAL en descendente, justo al revés de lo esperado. Arreglado
+   usando `float("inf")` en su lugar.
+
 ### N1 — Migración de la DB
 
-- [ ] **N1.1. DB legacy.** Si conservas una `library.db` anterior al 25/05, al arrancar verás en consola `[INFO] Migración DB: columna 'bpm' añadida`. Sin error.
-- [ ] **N1.2. DB nueva.** Tras borrar `library.db`, el arranque limpio crea la tabla con la columna `bpm` desde el principio. No aparece el log de migración.
+- [x] **N1.1. DB legacy.** Si conservas una `library.db` anterior al 25/05, al arrancar verás en consola `[INFO] Migración DB: columna 'bpm' añadida`. Sin error.
+- [x] **N1.2. DB nueva.** Tras borrar `library.db`, el arranque limpio crea la tabla con la columna `bpm` desde el principio. No aparece el log de migración.
 
 ### N2 — Cálculo automático al descargar
 
-- [ ] **N2.1. Descarga una pista** con MB OFF. En el log aparecen líneas "Calculando BPM: …" y "BPM: 128.0 (…)" o "BPM no detectado: …". La pista entra en biblioteca con la columna BPM rellena.
-- [ ] **N2.2. Descarga otra pista** con MB ON. Mismo comportamiento: además de los tags MB, se calcula y guarda el BPM.
-- [ ] **N2.3. Sin librosa.** Si librosa no está instalado (test manual: `pip uninstall librosa`), el log dice "BPM backend (librosa) no disponible" una sola vez al primer cálculo y las descargas siguen funcionando sin BPM (no rompe nada).
+- [x] **N2.1. Descarga una pista** con MB OFF. En el log aparecen líneas "Calculando BPM: …" y "BPM: 128.0 (…)" o "BPM no detectado: …". La pista entra en biblioteca con la columna BPM rellena.
+- [x] **N2.2. Descarga otra pista** con MB ON. Mismo comportamiento: además de los tags MB, se calcula y guarda el BPM.
+- [x] **N2.3. Sin librosa.** Si librosa no está instalado (test manual: `pip uninstall librosa`), el log dice "BPM backend (librosa) no disponible" una sola vez al primer cálculo y las descargas siguen funcionando sin BPM (no rompe nada).
 
 ### N3 — Botón "Calcular BPM" masivo
 
-- [ ] **N3.1. Botón visible** en la barra superior junto a "Enriquecer con MusicBrainz".
-- [ ] **N3.2. Pulsa el botón** con la biblioteca con pistas viejas sin BPM. Confirmación con número de pistas y tiempo estimado (~3 s/pista).
-- [ ] **N3.3. Modal de progreso** similar al de Enriquecer: contador, barra, label "Calculando BPM (librosa)", última pista con BPM detectado o "✗ Sin BPM".
-- [ ] **N3.4. Cancelar.** El botón "Cancelar" interrumpe el proceso. Las pistas ya procesadas quedan con BPM guardado.
-- [ ] **N3.5. Nada que calcular.** Si todas las pistas tienen BPM, mensaje "Nada que calcular".
+- [x] **N3.1. Botón visible** en la barra superior junto a "Enriquecer con MusicBrainz".
+- [x] **N3.2. Pulsa el botón** con la biblioteca con pistas viejas sin BPM. Confirmación con número de pistas y tiempo estimado (~3 s/pista).
+- [x] **N3.3. Modal de progreso** similar al de Enriquecer: contador, barra, label "Calculando BPM (librosa)", última pista con BPM detectado o "✗ Sin BPM".
+- [x] **N3.4. Cancelar.** El botón "Cancelar" interrumpe el proceso. Las pistas ya procesadas quedan con BPM guardado.
+- [x] **N3.5. Nada que calcular.** Si todas las pistas tienen BPM, mensaje "Nada que calcular".
 
 ### N4 — Modo fiesta (autoplay)
 
-- [ ] **N4.0. Botón "Fiesta"** visible en la barra inferior junto a EQ.
-- [ ] **N4.1. Activar fiesta sin pistas en el rango.** Asegúrate de que ninguna pista de la biblioteca tiene BPM en el rango configurado. Pulsa Fiesta. Aparece aviso "Modo fiesta sin pistas" sugiriendo calcular BPM o cambiar el rango. El modo no se activa, no se vacía la cola actual.
-- [ ] **N4.2. Activar fiesta sin cola previa.** Sin nada en cola, pulsa Fiesta. Arranca a reproducir inmediatamente una pista aleatoria del rango. Botón pasa a "Fiesta 110–140" en color destacado.
-- [ ] **N4.3. Activar fiesta con cola previa.** Carga una cola normal y reproduce. Pulsa Fiesta. La cola actual se reemplaza completamente por la fiesta (la previa se pierde). Empieza una pista del rango.
-- [ ] **N4.4. Autollenado.** Abre el panel "Cola" tras activar. Hay 3 pistas (semilla) o más. Deja avanzar (next ⏭ varias veces). La cola crece sola: siempre hay 2 pistas por delante de la actual.
-- [ ] **N4.5. Shuffle inteligente.** En la cola autollenada, no debe haber dos pistas seguidas del mismo artista (mientras sea posible).
-- [ ] **N4.6. Pool fresco.** Con un rango BPM que contenga pocas pistas (ej. 5-7), deja sonar varias hasta agotarlas. En el log aparece "Modo fiesta: pool agotado, reiniciando rotación" y la rotación continúa.
-- [ ] **N4.7. Crossfade forzado.** Al activar el modo fiesta, el crossfade pasa a ON con la duración configurada en Ajustes para fiesta (default 6 s). Entre pistas suena el fundido.
-- [ ] **N4.8. Desactivar fiesta.** Pulsa el botón otra vez. Vuelve a "Fiesta" gris. La cola se vacía. La reproducción se detiene. El crossfade vuelve a la configuración previa.
-- [ ] **N4.9. Doble clic en biblioteca durante fiesta.** Con la fiesta activa, doble clic en una pista de la biblioteca. La fiesta se desactiva automáticamente; se carga la nueva cola y empieza a sonar esa pista. El crossfade vuelve a la config previa.
+- [x] **N4.0. Botón "Fiesta"** visible en la barra inferior junto a EQ (confirmado por captura de pantalla).
+- [x] **N4.1. Activar fiesta sin pistas en el rango.** Sin pistas en rango, `set_party_mode` devuelve pool=0 y NO toca la cola existente (verificado que la cola previa queda intacta). El aviso "Modo fiesta sin pistas" está en el código de `_player_toggle_party` (gui_app.py:2053-2061), no se re-verificó el texto exacto en pantalla.
+- [x] **N4.2. Activar fiesta sin cola previa.** Pool=6, cola se llena con semilla de 3, arranca a reproducir, `party_enabled=True` con el rango correcto.
+- [x] **N4.3. Activar fiesta con cola previa.** La cola vieja se reemplaza por completo (0 pistas viejas sobreviven).
+- [x] **N4.4. Autollenado.** Tras 10 ciclos de avance, siempre quedaron ≥2 pistas por delante del índice activo (lookahead mantenido).
+- [x] **N4.5. Shuffle inteligente.** Secuencia de 12 pistas autollenadas sin un solo par de artistas consecutivos iguales.
+- [x] **N4.6. Pool fresco.** Con pool de 2 pistas, "Modo fiesta: pool agotado, reiniciando rotación" apareció repetidamente en el log de eventos según se agotaba; la rotación siguió sin romperse.
+- [x] **N4.7. Crossfade forzado.** Al activar, `crossfade_enabled=True` y `crossfade_seconds` igual al configurado para fiesta.
+- [x] **N4.8. Desactivar fiesta.** Cola vaciada, `party_enabled=False`, crossfade restaurado al general.
+- [x] **N4.9. Doble clic en biblioteca durante fiesta.** `load_queue()` desactiva la fiesta, deja la cola con solo esa pista, restaura el crossfade.
 
 ### N5 — Range slider y presets de fiesta
 
-- [ ] **N5.1. Range slider.** Abre Ajustes. Sección "Modo fiesta" tiene 4 botones preset, un range slider con dos thumbs (puedes arrastrar cada uno) y la etiqueta "X – Y" que se actualiza en vivo. El rango total va de 60 a 200.
-- [ ] **N5.2. Arrastrar thumbs.** Mueve el thumb izquierdo: el derecho no se mueve y el izquierdo no puede pasar de él. Igual al revés. La etiqueta se actualiza al arrastrar.
-- [ ] **N5.3. Click en preset "Chill".** Los thumbs saltan a 70 y 100. La etiqueta marca "70 – 100".
-- [ ] **N5.4. Click en preset "Bailable".** Thumbs a 120 y 145.
-- [ ] **N5.5. Guardar.** Pulsa Guardar. Reabre Ajustes: el rango se mantiene en los valores elegidos.
-- [ ] **N5.6. Crossfade en fiesta.** Cambia el slider "Crossfade en fiesta" a 10 s, Guardar. Activa Fiesta: el fade entre pistas dura ~10 s.
-- [ ] **N5.7. Crossfade general no se machaca.** Con Fiesta activa, abre Ajustes y cambia el crossfade general. Al guardar, el crossfade del player no se modifica (lo gestiona party_mode). Al desactivar Fiesta, el crossfade general queda en el nuevo valor.
+- [x] **N5.1. Range slider.** Sección "Modo fiesta": 4 presets, rango 60-200, label inicial correcta. (Encontró y motivó el fix del bug #1 de arriba — antes de arreglarlo, esta sección ni siquiera se creaba.)
+- [x] **N5.2. Arrastrar thumbs.** Min no puede pasar de max y viceversa (clamping verificado simulando el evento de arrastre sobre el widget real).
+- [x] **N5.3. Click en preset "Chill".** Thumbs a (70, 100), label "70 – 100".
+- [x] **N5.4. Click en preset "Bailable".** Thumbs a (120, 145).
+- [x] **N5.5. Guardar.** Rango guardado y persistido; reabrir Ajustes lo mantiene.
+- [x] **N5.6. Crossfade en fiesta.** Slider a 10s, Guardar, persiste (`party_crossfade_s == 10` tras reabrir Ajustes). Que el fade "suene" 10s no se verificó de oído — sí se verificó en N4.7 que el valor configurado se aplica literalmente a `player._crossfade_seconds` al activar.
+- [x] **N5.7. Crossfade general no se machaca.** Confirmado el comportamiento correcto Y encontrado el bug #2 de arriba: "no se machaca mientras la fiesta está activa" ya funcionaba, pero "al desactivar, queda en el nuevo valor" NO — arreglado, ahora sí.
 
 ### N6 — Columna BPM en biblioteca
 
-- [ ] **N6.1.** Vista Biblioteca: la tabla tiene una columna "BPM" entre "MB" y "Duración".
-- [ ] **N6.2.** Pistas con BPM calculado muestran el valor (ej. "128"). Pistas sin BPM muestran vacío.
-- [ ] **N6.3.** Click en el header "BPM" ordena numéricamente (ascendente con ▲, click otra vez para descendente ▼). Las pistas sin BPM quedan al final en asc, al principio en desc.
+- [x] **N6.1.** Vista Biblioteca: la tabla tiene una columna "BPM" entre "MB" y "Duración".
+- [x] **N6.2.** Pistas con BPM calculado muestran el valor (ej. "128"). Pistas sin BPM muestran vacío.
+- [x] **N6.3.** Click en el header "BPM" ordena numéricamente (ascendente con ▲, click otra vez para descendente ▼). Las pistas sin BPM quedan al final en asc, al principio en desc. Es el bug #3 de la nota de arriba — antes del fix quedaban al REVÉS.
 
 ---
 

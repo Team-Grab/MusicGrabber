@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 
 from core import library
-from core.state import log_event
+from core.state import log_event, state
 
 logger = logging.getLogger("Player")
 
@@ -124,8 +124,6 @@ class _Player:
         self._party_min_bpm: float = 110.0
         self._party_max_bpm: float = 140.0
         self._party_played: set = set()       # paths ya emitidos esta sesión
-        # Estado de crossfade previo al modo fiesta (para restaurar al salir)
-        self._party_pre_crossfade: Optional[Tuple[bool, int]] = None
         # Cuántas pistas se mantienen siempre por delante del índice activo
         self._PARTY_LOOKAHEAD = 2
         # Semilla inicial al activar la fiesta
@@ -260,9 +258,8 @@ class _Player:
                 # ahora mismo) ni hacer stop (vamos a llamar a _play_current).
                 self._party_enabled = False
                 self._party_played = set()
-                if self._party_pre_crossfade is not None:
-                    self._crossfade_enabled, self._crossfade_seconds = self._party_pre_crossfade
-                    self._party_pre_crossfade = None
+                self._crossfade_enabled = state.crossfade_enabled
+                self._crossfade_seconds = state.crossfade_seconds
                 log_event("info", "Modo fiesta OFF (cola reemplazada)")
             self._cancel_crossfade()
             self._queue = list(valid)
@@ -972,9 +969,10 @@ class _Player:
                               f"Modo fiesta: ninguna pista con BPM "
                               f"∈[{self._party_min_bpm:.0f}, {self._party_max_bpm:.0f}].")
                     return 0
-                # Guardar crossfade previo
-                self._party_pre_crossfade = (self._crossfade_enabled, self._crossfade_seconds)
-                # Forzar crossfade festivo
+                # Forzar crossfade festivo (al desactivar se restaura el
+                # crossfade GENERAL vigente en state, no uno "capturado" al
+                # activar — si el usuario lo cambia en Ajustes mientras la
+                # fiesta está sonando, ese cambio debe aplicarse al salir).
                 cf_s = int(party_crossfade_s) if party_crossfade_s is not None else 6
                 self._crossfade_enabled = True
                 self._crossfade_seconds = max(1, min(12, cf_s))
@@ -990,7 +988,6 @@ class _Player:
                     self._party_append_one_locked(pool)
                 if not self._queue:
                     self._party_enabled = False
-                    self._party_pre_crossfade = None
                     return 0
                 self._index = 0
                 self._play_current()
@@ -1012,9 +1009,8 @@ class _Player:
                 self._index = -1
                 self._party_enabled = False
                 self._party_played = set()
-                if self._party_pre_crossfade is not None:
-                    self._crossfade_enabled, self._crossfade_seconds = self._party_pre_crossfade
-                    self._party_pre_crossfade = None
+                self._crossfade_enabled = state.crossfade_enabled
+                self._crossfade_seconds = state.crossfade_seconds
                 log_event("info", "Modo fiesta OFF")
                 return 0
 
